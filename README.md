@@ -182,7 +182,7 @@ A low saliency score means:
 ```
 Original GETA:
 ┌─────────────────────────────────────────────────────────┐
-│ Input → [Layer 1] → [Layer 2] → ... → [Layer N] → Loss │
+│ Input → [Layer 1] → [Layer 2] → ... → [Layer N] → Loss  │
 │                                              ↑          │
 │                                       Only gradients    │
 │                                       (backward pass)   │
@@ -190,12 +190,12 @@ Original GETA:
 
 XAI-GETA:
 ┌─────────────────────────────────────────────────────────┐
-│ Input → [Layer 1] → [Layer 2] → ... → [Layer N] → Loss │
-│    ↓         ↓           ↓                  ↑          │
-│ Data      Data        Data             Gradients       │
-│ Context   Context     Context         (backward pass)  │
-│    ↓         ↓           ↓                  ↑          │
-│ Attributions computed for each layer using actual data │
+│ Input → [Layer 1] → [Layer 2] → ... → [Layer N] → Loss  │
+│    ↓         ↓           ↓                  ↑           │
+│ Data      Data        Data             Gradients        │
+│ Context   Context     Context         (backward pass)   │
+│    ↓         ↓           ↓                  ↑           │
+│ Attributions computed for each layer using actual data  │
 └─────────────────────────────────────────────────────────┘
 ```
 
