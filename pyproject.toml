@@ -1,0 +1,21 @@
+[project]
+name = "geta_xai"
+version = "0.1.0"
+description = "XAI-based pruning and quantazation training"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.7.0",
+    "transformers",
+    "torchvision",
+    "torchaudio",
+    "numpy",
+    "captum",
+    "opencv-python",
+    "pandas",
+    "scikit-learn",
+    "lxt",
+    "grad-cam",
+    "ultralytics",
+    "seaborn",
+]
