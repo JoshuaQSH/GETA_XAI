@@ -18,9 +18,9 @@ import sys
 import os
 
 # Add the geta directory to path
-currentdir = os.path.dirname(os.path.realpath(__name__))
+currentdir = os.path.dirname(os.path.abspath(__file__))
 parentdir = os.path.dirname(currentdir)
-sys.path.append(parentdir)
+sys.path.insert(0, parentdir)
 
 from only_train_once import OTO
 from only_train_once.transform import tensor_transformation

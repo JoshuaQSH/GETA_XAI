@@ -36,9 +36,34 @@ We recommend to run the framework under `pytorch>=2.0` and to use `git clone` to
 git clone https://github.com/microsoft/geta.git
 ```
 
-We also offer a `pyproject.toml` and can be installed with `uv`.
+We also offer a `pyproject.toml` and can be installed with `uv`. You can simply do:
+
+```bash
+# Create a virtual environment with uv
+uv venv
+source .venv/bin/activate
+uv sync
+```
+
+If you do not have `uv`, you can either download it with:
+
+```bash
+# Use curl
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Or wget
+wget -qO- https://astral.sh/uv/install.sh | sh
+# Or pip
+pip install uv
+
+# When uv is installed via the standalone installer, it can update itself on-demand
+uv self update
+```
+
+Check out [uv](https://docs.astral.sh/uv/getting-started/installation/) for more details. But it is also
 
 ## Quick Start
+
+### Running the demo
 
 ```bash
 # Try the vgg7 with CIFAR10 
@@ -46,6 +71,41 @@ python qvgg7_xaigeta_demo.py
 
 # To compare with the GETA 
 python qvgg7_geta_demo.py
+```
+
+### Running script
+
+We also have a `run_xaigeta_experiments.sh` ready for running the demo:
+
+```bash
+
+Options:
+  -m, --method METHOD     Attribution method (default: run all methods)
+  -w, --weight WEIGHT     Attribution weight 0.0-1.0 (default: 0.3)
+  -e, --epochs EPOCHS     Number of epochs (default: 50)
+  -d, --device DEVICE     Device to use (default: cuda:0)
+  -a, --all               Run all methods with all default weights
+  -f, --fast              Run only fast methods (saliency, input_x_gradient, deconvolution)
+  -l, --list              List all available attribution methods
+  -h, --help              Show this help message
+
+Examples:
+  ./run_xaigeta_experiments.sh -m saliency -w 0.3 -e 50    # Single experiment
+  ./run_xaigeta_experiments.sh --all                        # All methods with weights 0.1, 0.3, 0.5
+  ./run_xaigeta_experiments.sh --fast -e 10                 # Fast methods, 10 epochs each
+
+Available methods:
+  - saliency
+  - input_x_gradient
+  - guided_backprop
+  - deconvolution
+  - layer_conductance
+  - layer_gradient_x_activation
+  - layer_integrated_gradients
+  - deep_lift
+  - integrated_gradients
+  - lrp
+  - layer_lrp
 ```
 
 ## The XAI-GETA 
@@ -199,9 +259,30 @@ XAI-GETA:
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Experimental Setup
+
+- **Bit width reduction**: \( b_r = 2 \)  
+- **Bit width range**: \([b_l, b_u] = [4, 16]\)  
+- **Exponential**: \( t = 1 \)  
+- **Maximum quantization range**: \( q_m = 32/8 \) bits  
+- **Datasets**:  
+  - CIFAR-10: VGG7, ResNet20  
+  - ImageNet: ResNet50  
+  - SQuAD: BERT  
+
+---
+
+## Training & Pruning Configuration Table
+
+| Model     | Sparsity         | Total Epochs | Projection Periods \(B\) | Projection Steps \(K_b\) | Pruning Periods \(P\) | Pruning Steps \(K_p\) | Optimizer             |
+|----------|------------------|--------------|----------------------------|----------------------------|-------------------------|-------------------------|-----------------------|
+| VGG7     | 0.7              | 200          | 5                          | 20                         | 10                      | 30                      | Adam (1e-3) + StepLR |
+| ResNet20 | 0.35             | 350          | 7                          | 35                         | 5                       | 30                      | SGD (1e-1) + StepLR  |
+| ResNet50 | 0.4, 0.5         | 120          | 5                          | 5                          | 10                      | 10                      | SGD (1e-1) + StepLR  |
+| BERT     | 0.1, 0.3, 0.5, 0.7| 10           | 4                          | 1                          | 6                       | 6                       | AdamW (3e-5)        |
+
 #### Saliency-based results
 
-![img](./img_folder/comparison_training_loss.png)
-![img](./img_folder/comparison_final_accuracy.png)
+TODO
 
-
+Now I need you to create 
