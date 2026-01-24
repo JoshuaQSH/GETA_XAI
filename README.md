@@ -284,5 +284,3 @@ XAI-GETA:
 #### Saliency-based results
 
 TODO
-
-Now I need you to create 
