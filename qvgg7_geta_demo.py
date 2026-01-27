@@ -7,6 +7,7 @@ from only_train_once.quantization.quant_model import model_to_quantize_model
 from only_train_once.quantization.quant_layers import QuantizationMode
 from sanity_check.backends.vgg7 import vgg7_bn
 from only_train_once import OTO
+from only_train_once.optimizer import GETA
 import torch
 
 from torchvision.datasets import CIFAR10
@@ -127,12 +128,15 @@ def train_geta(trainloader, testloader, model, oto, max_epoch=50, device=DEVICE)
     criterion = torch.nn.CrossEntropyLoss()
     # Every 50 epochs, decay lr by 10.0
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1) 
-
+        
     for epoch in range(max_epoch):
         f_avg_val = 0.0
         model.train()
         lr_scheduler.step()
-        for X, y in trainloader:
+        pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{max_epoch}", leave=False)        
+
+        # for X, y in trainloader:
+        for batch_idx, (X, y) in enumerate(pbar):
             X = X.to(device)
             y = y.to(device)
             y_pred = model.forward(X)
@@ -141,6 +145,9 @@ def train_geta(trainloader, testloader, model, oto, max_epoch=50, device=DEVICE)
             f.backward()
             f_avg_val += f
             optimizer.step()
+            
+            pbar.set_postfix({'loss': f.item()})
+            
         opt_metrics = optimizer.compute_metrics()
         accuracy1, accuracy5 = check_accuracy(model, testloader)
         f_avg_val = f_avg_val.cpu().item() / len(trainloader)
@@ -151,31 +158,43 @@ def train_geta(trainloader, testloader, model, oto, max_epoch=50, device=DEVICE)
             num_grps_import=opt_metrics.num_important_groups, num_grps_redund=opt_metrics.num_redundant_groups
             ))
     
-    return model, oto.compressed_model_path
-
-def get_compressed_model_size(compressed_model_path, device=DEVICE):
+    return model, oto
+    
+def get_compressed_model_size(oto_instance, device=DEVICE):
     # By default OTO will construct subnet by the last checkpoint. If intermedia ckpt reaches the best performance,
     # need to reinitialize OTO instance
     # oto = OTO(torch.load(ckpt_path), dummy_input)
     # then construct subnetwork
     dummy_input = torch.rand(1, 3, 32, 32)
-    oto.construct_subnet(out_dir='./cache')
-    compressed_model = torch.load(compressed_model_path)
-    oto_compressed = OTO(compressed_model, dummy_input.to(device))
     
-    # Get full model MACs, BOPs
-    full_macs = oto.compute_macs(in_million=True, layerwise=True)
-    full_bops = oto.compute_bops(in_million=True, layerwise=True)
-    full_num_params = oto.compute_num_params(in_million=True)
+    # Get full model MACs, BOPs (before constructing subnet)
+    full_macs = oto_instance.compute_macs(in_million=True, layerwise=True)
+    full_bops = oto_instance.compute_bops(in_million=True, layerwise=True)
+    full_num_params = oto_instance.compute_num_params(in_million=True)
+    
+    # Construct the compressed subnet - this sets compressed_model_path
+    oto_instance.construct_subnet(out_dir='./cache')
+    compressed_model_path = oto_instance.compressed_model_path
+    
+    if compressed_model_path is None:
+        print("Warning: compressed_model_path is None, subnet may not have been constructed properly")
+        return
+    
+    print(f"Loading compressed model from: {compressed_model_path}")
+    compressed_model = torch.load(compressed_model_path, map_location=device, weights_only=False)
+    oto_compressed = OTO(compressed_model, dummy_input.to(device))
 
     # Get compressed model MACs, BOPs
     compressed_macs = oto_compressed.compute_macs(in_million=True, layerwise=True)
     compressed_bops = oto_compressed.compute_bops(in_million=True, layerwise=True)
 
-    print(f"Full MACs for VGG7: {full_macs['total']} M MACs")
-    print(f"Full BOPs for VGG7: {full_bops['total']} M BOPs")
-    print(f"Compressed MACs for VGG7: {compressed_macs['total']} M MACs")
-    print(f"Compressed BOPs for VGG7: {compressed_bops['total']} M BOPs")
+    print(f"Full MACs for VGG7: {full_macs['total']:.2f} M MACs")
+    print(f"Full BOPs for VGG7: {full_bops['total']:.2f} M BOPs")
+    print(f"Full Params for VGG7: {full_num_params:.2f} M")
+    print(f"Compressed MACs for VGG7: {compressed_macs['total']:.2f} M MACs")
+    print(f"Compressed BOPs for VGG7: {compressed_bops['total']:.2f} M BOPs")
+    print(f"MACs Reduction: {(1 - compressed_macs['total'] / full_macs['total']) * 100:.2f}%")
+    print(f"BOPs Reduction: {(1 - compressed_bops['total'] / full_bops['total']) * 100:.2f}%")
 
-compressed_model, compressed_model_path = train_geta(trainloader, testloader, model, oto, max_epoch=50, device=DEVICE)
-get_compressed_model_size(compressed_model_path, device=DEVICE)
+compressed_model, oto = train_geta(trainloader, testloader, model, oto, max_epoch=2, device=DEVICE)
+get_compressed_model_size(oto, device=DEVICE)

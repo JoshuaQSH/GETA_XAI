@@ -108,6 +108,23 @@ Available methods:
   - layer_lrp
 ```
 
+## Reprducing experiments
+
+- `./run_cases/configs`: Configurations to reproduce the experimental results
+- `./run_cases/**.py`: Running examples
+
+```bash
+# Use YAML config only
+python vgg7_cifar10_geta.py --config configs/default_geta.yaml
+
+# YAML config with CLI overrides (CLI takes priority)
+# CLI arguments > YAML config > ExperimentConfig defaults
+python vgg7_cifar10_xaigeta.py --config configs/default_xai_geta.yaml --epochs 50 --method deep_lift
+
+# Original CLI-only mode still works
+python vgg7_cifar10_geta.py --epochs 200 --sparsity 0.7
+```
+
 ## The XAI-GETA 
 
 XAI-GETA extends GETA by incorporating **Captum attribution methods** (e.g., Saliency) to provide data-driven importance scores:

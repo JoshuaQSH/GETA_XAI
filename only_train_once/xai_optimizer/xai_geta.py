@@ -418,6 +418,7 @@ class XAI_GETA(BaseHybridSparseOptimizer):
 
     def step(self, closure=None, inputs=None, targets=None):
         """
+        Core function.
         Perform a single optimization step.
         
         Args:

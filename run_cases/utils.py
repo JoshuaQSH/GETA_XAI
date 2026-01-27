@@ -11,9 +11,10 @@ import sys
 import csv
 import argparse
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional, Tuple, Dict, Any
 
+import yaml
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -57,6 +58,7 @@ class ExperimentConfig:
     exponential_t: float = 1.0
     
     # Stage configuration (in epochs)
+    start_projection_step: int = 0
     projection_periods: int = 5
     projection_epochs: int = 20
     pruning_periods: int = 10
@@ -87,6 +89,192 @@ AVAILABLE_METHODS = [
     'layer_integrated_gradients', 'deep_lift', 'integrated_gradients',
     'lrp', 'layer_lrp', 'gradient_shap'
 ]
+
+
+# ============================================================================
+# YAML Config Loading
+# ============================================================================
+
+def load_config_from_yaml(yaml_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        yaml_path: Path to the YAML configuration file
+        
+    Returns:
+        Dictionary containing the configuration
+    """
+    if not os.path.exists(yaml_path):
+        raise FileNotFoundError(f"Config file not found: {yaml_path}")
+    
+    with open(yaml_path, 'r') as f:
+        config_dict = yaml.safe_load(f)
+    
+    return config_dict
+
+
+def yaml_to_experiment_config(yaml_config: Dict[str, Any]) -> ExperimentConfig:
+    """
+    Convert a YAML config dictionary to an ExperimentConfig dataclass.
+    
+    Args:
+        yaml_config: Dictionary loaded from YAML file
+        
+    Returns:
+        ExperimentConfig instance
+    """
+    config = ExperimentConfig()
+    
+    # Dataset settings
+    if 'dataset' in yaml_config:
+        ds = yaml_config['dataset']
+        config.dataset_root = ds.get('root', config.dataset_root)
+        config.batch_size = ds.get('batch_size', config.batch_size)
+        config.num_workers = ds.get('num_workers', config.num_workers)
+    
+    # Training settings
+    if 'training' in yaml_config:
+        tr = yaml_config['training']
+        config.epochs = tr.get('epochs', config.epochs)
+        config.lr = tr.get('lr', config.lr)
+        config.lr_quant = tr.get('lr_quant', config.lr_quant)
+        config.weight_decay = tr.get('weight_decay', config.weight_decay)
+        config.lr_step_size = tr.get('lr_step_size', config.lr_step_size)
+        config.lr_gamma = tr.get('lr_gamma', config.lr_gamma)
+    
+    # GETA/Quantization settings
+    if 'geta' in yaml_config:
+        geta = yaml_config['geta']
+        config.target_sparsity = geta.get('target_sparsity', config.target_sparsity)
+        config.bit_reduction = geta.get('bit_reduction', config.bit_reduction)
+        config.min_bit = geta.get('min_bit', config.min_bit)
+        config.max_bit = geta.get('max_bit', config.max_bit)
+        config.exponential_t = geta.get('exponential_t', config.exponential_t)
+    
+    # Stage settings
+    if 'stages' in yaml_config:
+        stages = yaml_config['stages']
+        config.start_projection_step = stages.get('start_projection_step', config.start_projection_step)
+        config.projection_periods = stages.get('projection_periods', config.projection_periods)
+        config.projection_epochs = stages.get('projection_epochs', config.projection_epochs)
+        config.pruning_periods = stages.get('pruning_periods', config.pruning_periods)
+        config.pruning_epochs = stages.get('pruning_epochs', config.pruning_epochs)
+    
+    # XAI settings
+    if 'xai' in yaml_config:
+        xai = yaml_config['xai']
+        config.attribution_method = xai.get('attribution_method', config.attribution_method)
+        config.attribution_weight = xai.get('attribution_weight', config.attribution_weight)
+        config.attribution_freq = xai.get('attribution_freq', config.attribution_freq)
+        config.attribution_n_steps = xai.get('attribution_n_steps', config.attribution_n_steps)
+        config.ema_decay = xai.get('ema_decay', config.ema_decay)
+        config.num_samples = xai.get('num_samples', config.num_samples)
+        config.baseline_type = xai.get('baseline_type', config.baseline_type)
+        config.update_freq = xai.get('update_freq', config.attribution_freq)  # Alias
+    
+    # Device
+    config.device = yaml_config.get('device', config.device)
+    
+    # Output settings
+    if 'output' in yaml_config:
+        out = yaml_config['output']
+        config.output_dir = out.get('dir', config.output_dir)
+        config.experiment_name = out.get('experiment_name', config.experiment_name)
+    
+    return config
+
+
+def merge_config_with_args(config: ExperimentConfig, args: argparse.Namespace, 
+                           is_xai: bool = False) -> ExperimentConfig:
+    """
+    Merge ExperimentConfig with command-line arguments.
+    CLI arguments override YAML config values (if explicitly provided).
+    
+    Args:
+        config: Base ExperimentConfig (from YAML or defaults)
+        args: Parsed command-line arguments
+        is_xai: Whether this is an XAI-GETA experiment
+        
+    Returns:
+        Merged ExperimentConfig
+    """
+    # Helper to check if arg was explicitly provided (not default)
+    def arg_provided(arg_name: str, default_value: Any) -> bool:
+        return hasattr(args, arg_name) and getattr(args, arg_name) != default_value
+    
+    # Dataset - always override if provided
+    if hasattr(args, 'dataset_root') and args.dataset_root != '../datasets':
+        config.dataset_root = args.dataset_root
+    if hasattr(args, 'batch_size') and args.batch_size != 64:
+        config.batch_size = args.batch_size
+    if hasattr(args, 'num_workers') and args.num_workers != 4:
+        config.num_workers = args.num_workers
+    
+    # Training
+    if hasattr(args, 'epochs') and args.epochs != 200:
+        config.epochs = args.epochs
+    if hasattr(args, 'lr') and args.lr != 1e-3:
+        config.lr = args.lr
+    if hasattr(args, 'lr_quant') and args.lr_quant != 1e-3:
+        config.lr_quant = args.lr_quant
+    if hasattr(args, 'weight_decay') and args.weight_decay != 1e-4:
+        config.weight_decay = args.weight_decay
+    if hasattr(args, 'lr_step_size') and args.lr_step_size != 50:
+        config.lr_step_size = args.lr_step_size
+    if hasattr(args, 'lr_gamma') and args.lr_gamma != 0.1:
+        config.lr_gamma = args.lr_gamma
+    
+    # GETA
+    if hasattr(args, 'sparsity') and args.sparsity != 0.7:
+        config.target_sparsity = args.sparsity
+    if hasattr(args, 'bit_reduction') and args.bit_reduction != 2:
+        config.bit_reduction = args.bit_reduction
+    if hasattr(args, 'min_bit') and args.min_bit != 4:
+        config.min_bit = args.min_bit
+    if hasattr(args, 'max_bit') and args.max_bit != 16:
+        config.max_bit = args.max_bit
+    
+    # Stages
+    if hasattr(args, 'projection_periods') and args.projection_periods != 5:
+        config.projection_periods = args.projection_periods
+    if hasattr(args, 'projection_epochs') and args.projection_epochs != 20:
+        config.projection_epochs = args.projection_epochs
+    if hasattr(args, 'pruning_periods') and args.pruning_periods != 10:
+        config.pruning_periods = args.pruning_periods
+    if hasattr(args, 'pruning_epochs') and args.pruning_epochs != 30:
+        config.pruning_epochs = args.pruning_epochs
+    
+    # Device
+    if hasattr(args, 'device') and args.device != 'cuda:0':
+        config.device = args.device
+    
+    # Output
+    if hasattr(args, 'output_dir') and args.output_dir != './outputs':
+        config.output_dir = args.output_dir
+    if hasattr(args, 'experiment_name') and args.experiment_name != '':
+        config.experiment_name = args.experiment_name
+    
+    # XAI-specific
+    if is_xai:
+        if hasattr(args, 'method') and args.method != 'saliency':
+            config.attribution_method = args.method
+        if hasattr(args, 'weight') and args.weight != 0.3:
+            config.attribution_weight = args.weight
+        if hasattr(args, 'attribution_freq') and args.attribution_freq != 100:
+            config.attribution_freq = args.attribution_freq
+        if hasattr(args, 'attribution_n_steps') and args.attribution_n_steps != 5:
+            config.attribution_n_steps = args.attribution_n_steps
+        if hasattr(args, 'ema_decay') and args.ema_decay != 0.9:
+            config.ema_decay = args.ema_decay
+        if hasattr(args, 'num_samples') and args.num_samples != 10:
+            config.num_samples = args.num_samples
+        if hasattr(args, 'baseline_type') and args.baseline_type != 'zero':
+            config.baseline_type = args.baseline_type
+        if hasattr(args, 'update_freq') and args.update_freq != 100:
+            config.update_freq = args.update_freq
+    
+    return config
 
 
 @dataclass
@@ -135,6 +323,10 @@ def get_base_parser(description: str = 'GETA Experiment') -> argparse.ArgumentPa
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
+    # Config file (highest priority after CLI args)
+    parser.add_argument('--config', '-c', type=str, default=None,
+                        help='Path to YAML configuration file')
+    
     # Dataset
     parser.add_argument('--dataset-root', type=str, default='../datasets',
                         help='Root directory for datasets')
@@ -168,6 +360,8 @@ def get_base_parser(description: str = 'GETA Experiment') -> argparse.ArgumentPa
                         help='Maximum bit width')
     
     # Stage configuration
+    parser.add_argument('--start-projection-step', type=int, default=0, 
+                        help='Starting step for projection')
     parser.add_argument('--projection-periods', type=int, default=5,
                         help='Number of projection periods')
     parser.add_argument('--projection-epochs', type=int, default=20,
@@ -223,39 +417,55 @@ def get_xai_parser(description: str = 'XAI-GETA Experiment') -> argparse.Argumen
 
 
 def args_to_config(args, is_xai: bool = False) -> ExperimentConfig:
-    """Convert parsed arguments to ExperimentConfig."""
-    config = ExperimentConfig(
-        dataset_root=args.dataset_root,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        epochs=args.epochs,
-        lr=args.lr,
-        lr_quant=args.lr_quant,
-        weight_decay=args.weight_decay,
-        lr_step_size=args.lr_step_size,
-        lr_gamma=args.lr_gamma,
-        target_sparsity=args.sparsity,
-        bit_reduction=args.bit_reduction,
-        min_bit=args.min_bit,
-        max_bit=args.max_bit,
-        projection_periods=args.projection_periods,
-        projection_epochs=args.projection_epochs,
-        pruning_periods=args.pruning_periods,
-        pruning_epochs=args.pruning_epochs,
-        device=args.device,
-        output_dir=args.output_dir,
-        experiment_name=args.experiment_name,
-    )
+    """
+    Convert parsed arguments to ExperimentConfig.
     
-    if is_xai:
-        config.attribution_method = args.method
-        config.attribution_weight = args.weight
-        config.attribution_freq = args.attribution_freq
-        config.attribution_n_steps = args.attribution_n_steps
-        config.ema_decay = args.ema_decay
-        config.num_samples = args.num_samples
-        config.baseline_type = args.baseline_type
-        config.update_freq = args.update_freq
+    Priority: CLI args > YAML config > defaults
+    
+    If --config is provided, load from YAML first, then override with any 
+    explicitly provided CLI arguments.
+    """
+    # Start with defaults or load from YAML
+    if hasattr(args, 'config') and args.config is not None:
+        print(f"Loading configuration from: {args.config}")
+        yaml_config = load_config_from_yaml(args.config)
+        config = yaml_to_experiment_config(yaml_config)
+        # Merge CLI args (they override YAML values)
+        config = merge_config_with_args(config, args, is_xai=is_xai)
+    else:
+        # No YAML config, use CLI args directly
+        config = ExperimentConfig(
+            dataset_root=args.dataset_root,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            epochs=args.epochs,
+            lr=args.lr,
+            lr_quant=args.lr_quant,
+            weight_decay=args.weight_decay,
+            lr_step_size=args.lr_step_size,
+            lr_gamma=args.lr_gamma,
+            target_sparsity=args.sparsity,
+            bit_reduction=args.bit_reduction,
+            min_bit=args.min_bit,
+            max_bit=args.max_bit,
+            projection_periods=args.projection_periods,
+            projection_epochs=args.projection_epochs,
+            pruning_periods=args.pruning_periods,
+            pruning_epochs=args.pruning_epochs,
+            device=args.device,
+            output_dir=args.output_dir,
+            experiment_name=args.experiment_name,
+        )
+        
+        if is_xai:
+            config.attribution_method = args.method
+            config.attribution_weight = args.weight
+            config.attribution_freq = args.attribution_freq
+            config.attribution_n_steps = args.attribution_n_steps
+            config.ema_decay = args.ema_decay
+            config.num_samples = args.num_samples
+            config.baseline_type = args.baseline_type
+            config.update_freq = args.update_freq
     
     return config
 
@@ -404,12 +614,15 @@ def print_results_summary(results: ExperimentResults):
         print(f"Attribution Method: {results.attribution_method}")
         print(f"Attribution Weight: {results.attribution_weight}")
     print("-" * 70)
-    print(f"Full MACs:       {results.full_macs / 1e6:.2f} M")
-    print(f"Full BOPs:       {results.full_bops / 1e6:.2f} M")
-    print(f"Compressed MACs: {results.compressed_macs / 1e6:.2f} M")
-    print(f"Compressed BOPs: {results.compressed_bops / 1e6:.2f} M")
-    print(f"MACs Reduction:  {(1 - results.compressed_macs / results.full_macs) * 100:.2f}%")
-    print(f"BOPs Reduction:  {(1 - results.compressed_bops / results.full_bops) * 100:.2f}%")
+    # Values are already in millions from compute_macs/compute_bops
+    print(f"Full MACs:       {results.full_macs:.2f} M")
+    print(f"Full BOPs:       {results.full_bops:.2f} M")
+    print(f"Compressed MACs: {results.compressed_macs:.2f} M")
+    print(f"Compressed BOPs: {results.compressed_bops:.2f} M")
+    if results.full_macs > 0:
+        print(f"MACs Reduction:  {(1 - results.compressed_macs / results.full_macs) * 100:.2f}%")
+    if results.full_bops > 0:
+        print(f"BOPs Reduction:  {(1 - results.compressed_bops / results.full_bops) * 100:.2f}%")
     print("-" * 70)
     print(f"Final Top-1 Accuracy: {results.final_top1_accuracy:.2f}%")
     print(f"Final Top-5 Accuracy: {results.final_top5_accuracy:.2f}%")

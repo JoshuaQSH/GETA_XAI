@@ -92,7 +92,7 @@ def train_geta(
         first_momentum=0.9,
         weight_decay=config.weight_decay,
         target_group_sparsity=config.target_sparsity,
-        start_projection_step=0,
+        start_projection_step=config.start_projection_step,
         projection_periods=config.projection_periods,
         projection_steps=projection_steps,
         start_pruning_step=start_pruning_step,
@@ -129,11 +129,12 @@ def train_geta(
     
     # Get initial MACs and BOPs
     print("Computing initial MACs and BOPs...")
-    dummy_input = torch.rand(1, 3, 32, 32).to(config.device)
-    full_macs = oto.compute_macs(in_million=False)
-    full_bops = oto.compute_bops(in_million=False)
-    print(f"Full MACs: {full_macs / 1e6:.2f} M")
-    print(f"Full BOPs: {full_bops / 1e6:.2f} M")
+    full_macs_info = oto.compute_macs(in_million=True)
+    full_bops_info = oto.compute_bops(in_million=True)
+    full_macs = full_macs_info["total"]
+    full_bops = full_bops_info["total"]
+    print(f"Full MACs: {full_macs:.2f} M")
+    print(f"Full BOPs: {full_bops:.2f} M")
     
     # Training loop
     print("\nStarting GETA Training...")
@@ -183,11 +184,13 @@ def train_geta(
     final_metrics = optimizer.compute_metrics()
     
     # Compute compressed MACs and BOPs
-    compressed_macs = oto.compute_macs(in_million=False)
-    compressed_bops = oto.compute_bops(in_million=False)
+    compressed_macs_info = oto.compute_macs(in_million=True)
+    compressed_bops_info = oto.compute_bops(in_million=True)
+    compressed_macs = compressed_macs_info["total"]
+    compressed_bops = compressed_bops_info["total"]
     
-    print(f"Compressed MACs: {compressed_macs / 1e6:.2f} M")
-    print(f"Compressed BOPs: {compressed_bops / 1e6:.2f} M")
+    print(f"Compressed MACs: {compressed_macs:.2f} M")
+    print(f"Compressed BOPs: {compressed_bops:.2f} M")
     
     # Create results
     results = ExperimentResults(

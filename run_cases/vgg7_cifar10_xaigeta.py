@@ -49,7 +49,7 @@ import torch.nn as nn
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from only_train_once import OTO
-from only_train_once.optimizer import XAI_GETA
+from only_train_once.xai_optimizer import XAI_GETA, CaptumAttributionCalculator
 
 from run_cases.utils import (
     get_xai_parser,
@@ -104,13 +104,14 @@ def train_xai_geta(
     
     optimizer = XAI_GETA(
         params=param_groups,
+        model=model,  # Pass model for Captum attribution
         variant="adam",
         lr=config.lr,
         lr_quant=config.lr_quant,
         first_momentum=0.9,
         weight_decay=config.weight_decay,
         target_group_sparsity=config.target_sparsity,
-        start_projection_step=0,
+        start_projection_step=config.start_projection_step,
         projection_periods=config.projection_periods,
         projection_steps=projection_steps,
         start_pruning_step=start_pruning_step,
@@ -121,14 +122,11 @@ def train_xai_geta(
         max_bit_wt=config.max_bit,
         device=config.device,
         # XAI-specific parameters
-        model=model,
-        trainset=trainset,
-        num_classes=10,
-        num_samples=config.num_samples,
         attribution_method=config.attribution_method,
-        importance_weight=config.attribution_weight,
-        baseline_type=config.baseline_type,
-        update_freq=config.update_freq,
+        attribution_weight=config.attribution_weight,
+        ema_decay=config.ema_decay,
+        compute_attribution_freq=config.update_freq,
+        attribution_n_steps=config.attribution_n_steps,
     )
     
     # Store optimizer in OTO
@@ -146,8 +144,23 @@ def train_xai_geta(
     print(f"Attribution Method: {config.attribution_method}")
     print(f"Attribution Weight: {config.attribution_weight}")
     print(f"Update Frequency: {config.update_freq}")
-    print(f"Num Samples for Attribution: {config.num_samples}")
+    print(f"Attribution N-Steps: {config.attribution_n_steps}")
     print("=" * 70 + "\n")
+    
+    # Compute initial attributions
+    print("Computing initial attributions...")
+    try:
+        # Use smaller batch for initial attribution to save memory
+        small_trainloader = torch.utils.data.DataLoader(
+            trainset, batch_size=16, shuffle=True, num_workers=2
+        )
+        optimizer.compute_initial_attributions(small_trainloader, num_batches=2)
+        print(f"Initial attributions computed for {len(optimizer._cached_attributions)} layers")
+        del small_trainloader
+        torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"Warning: Could not compute initial attributions: {e}")
+        print("Continuing with fallback importance scoring...")
     
     # Training setup
     model.to(config.device)
@@ -160,11 +173,12 @@ def train_xai_geta(
     
     # Get initial MACs and BOPs
     print("Computing initial MACs and BOPs...")
-    dummy_input = torch.rand(1, 3, 32, 32).to(config.device)
-    full_macs = oto.compute_macs(in_million=False)
-    full_bops = oto.compute_bops(in_million=False)
-    print(f"Full MACs: {full_macs / 1e6:.2f} M")
-    print(f"Full BOPs: {full_bops / 1e6:.2f} M")
+    full_macs_info = oto.compute_macs(in_million=True)
+    full_bops_info = oto.compute_bops(in_million=True)
+    full_macs = full_macs_info["total"]
+    full_bops = full_bops_info["total"]
+    print(f"Full MACs: {full_macs:.2f} M")
+    print(f"Full BOPs: {full_bops:.2f} M")
     
     # Training loop
     print("\nStarting XAI-GETA Training...")
@@ -214,11 +228,13 @@ def train_xai_geta(
     final_metrics = optimizer.compute_metrics()
     
     # Compute compressed MACs and BOPs
-    compressed_macs = oto.compute_macs(in_million=False)
-    compressed_bops = oto.compute_bops(in_million=False)
+    compressed_macs_info = oto.compute_macs(in_million=True)
+    compressed_bops_info = oto.compute_bops(in_million=True)
+    compressed_macs = compressed_macs_info["total"]
+    compressed_bops = compressed_bops_info["total"]
     
-    print(f"Compressed MACs: {compressed_macs / 1e6:.2f} M")
-    print(f"Compressed BOPs: {compressed_bops / 1e6:.2f} M")
+    print(f"Compressed MACs: {compressed_macs:.2f} M")
+    print(f"Compressed BOPs: {compressed_bops:.2f} M")
     
     # Create results
     results = ExperimentResults(
