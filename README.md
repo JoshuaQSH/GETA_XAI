@@ -115,14 +115,20 @@ Available methods:
 
 ```bash
 # Use YAML config only
-python vgg7_cifar10_geta.py --config configs/default_geta.yaml
+python ./run_cases/vgg7_cifar10_geta.py --config ./run_cases/configs/default_geta.yaml
 
 # YAML config with CLI overrides (CLI takes priority)
 # CLI arguments > YAML config > ExperimentConfig defaults
-python vgg7_cifar10_xaigeta.py --config configs/default_xai_geta.yaml --epochs 50 --method deep_lift
+python ./run_cases/vgg7_cifar10_xaigeta.py --config ./run_cases/configs/default_xai_geta.yaml --epochs 50 --method deep_lift
 
 # Original CLI-only mode still works
-python vgg7_cifar10_geta.py --epochs 200 --sparsity 0.7
+python ./run_cases/vgg7_cifar10_geta.py --epochs 200 --sparsity 0.7
+
+
+# Running lists [TESTED]
+python ./run_cases/resnet20_cifar10_geta.py --config ./run_cases/configs/resnet20_cifar10_geta.yaml --epochs 2
+python ./run_cases/resnet50_imagenet_geta.py --config ./run_cases/configs/resnet50_imagenet_geta.yaml --epochs 2
+python ./run_cases/bert_squad_geta.py --config ./run_cases/configs/bert_squad_geta.yaml --epochs 2 --device cuda:0
 ```
 
 ## The XAI-GETA 
@@ -296,7 +302,28 @@ XAI-GETA:
 | VGG7     | 0.7              | 200          | 5                          | 20                         | 10                      | 30                      | Adam (1e-3) + StepLR |
 | ResNet20 | 0.35             | 350          | 7                          | 35                         | 5                       | 30                      | SGD (1e-1) + StepLR  |
 | ResNet50 | 0.4, 0.5         | 120          | 5                          | 5                          | 10                      | 10                      | SGD (1e-1) + StepLR  |
-| BERT     | 0.1, 0.3, 0.5, 0.7| 10           | 4                          | 1                          | 6                       | 6                       | AdamW (3e-5)        |
+| BERT     | 0.1, 0.3, 0.5, 0.7| 10          | 4                          | 1                          | 6                       | 6                       | AdamW (3e-5)         |
+
+## Autotuning
+
+We support both `Nevergrad` and `Optuna` backends
+
+- `only_train_once/autotune/autotune_xai.py` - Main AutotuneXAI class
+- `only_train_once/autotune/search_space.py` - XAISearchSpace definitions
+- `only_train_once/autotune/objectives.py` - Objective functions (accuracy, smoothness, multi-objective)
+
+Demo to start with (VGG7-BN model with sampled CIFAR-10):
+
+```bash
+# Run with Nevergrad (evolutionary)
+python autotune_demo.py --budget 30 --epochs 5 --backend nevergrad
+
+# Run with Optuna (Bayesian)
+python autotune_demo.py --budget 30 --epochs 5 --backend optuna
+
+# Run a larger demo
+python autotune_demo.py --budget 15 --epochs 50 --train-samples 10000 --test-samples 2000 --backend nevergrad --num-gpus 4 --output autotune_large_multi_gpu.json
+```
 
 #### Saliency-based results
 

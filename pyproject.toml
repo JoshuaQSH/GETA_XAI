@@ -18,4 +18,7 @@ dependencies = [
     "grad-cam",
     "ultralytics",
     "seaborn",
+    "tqdm",
+    "nevergrad>=1.0.12",
+    "optuna>=4.7.0",
 ]
