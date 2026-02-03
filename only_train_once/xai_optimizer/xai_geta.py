@@ -1016,24 +1016,51 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         except Exception as e:
             # If any error occurs, return default 8-bit
             return 8.0
-
+    
     def _d_quant_helper(self, bit_width, q_m, t_quant=None):
         """Convert bit width to d_quant."""
-        if isinstance(q_m, torch.Tensor):
-            q_m_val = q_m.item()
-        else:
-            q_m_val = q_m
+        if t_quant is None:
+            t_quant = 1.0
         
+        # SAFEGUARD: bit_width must be at least 2 to avoid denom=0
+        bit_width = int(bit_width)
+        if bit_width < 2:
+            bit_width = 2
+        if bit_width > 32:
+            bit_width = 32
+        
+        if isinstance(q_m, torch.Tensor):
+            # q_m_val = q_m.item()
+            q_m_val = torch.max(torch.abs(q_m)).item()
+        else:
+            # q_m_val = q_m
+            q_m_val = float(abs(q_m))
+        
+        # SAFEGUARDS -> prevent log(0)
+        q_m_val = max(q_m_val, 1e-10)
+        t_quant = float(t_quant)
+        t_quant = min(max(t_quant, 0.0), 8.0) # cap exponent growth
+        
+        denom = (2 ** (bit_width - 1) - 1)
         if t_quant is not None:
             if isinstance(t_quant, torch.Tensor):
                 t_quant_val = t_quant.item()
             else:
                 t_quant_val = t_quant
-            q_max = np.exp(t_quant_val * np.log(q_m_val))
-        else:
-            q_max = q_m_val
+        log_d = t_quant_val * math.log(q_m_val) - math.log(denom) # cap log_d to avoid exp overflow in Python
+        log_d = min(log_d, 80.0)  # exp(80) ~ 5e34, already huge but finite
+        d_quant = math.exp(log_d)
         
-        d_quant = q_max / (2 ** (bit_width - 1) - 1)
+        # if t_quant is not None:
+        #     if isinstance(t_quant, torch.Tensor):
+        #         t_quant_val = t_quant.item()
+        #     else:
+        #         t_quant_val = t_quant
+        #     q_max = np.exp(t_quant_val * np.log(q_m_val))
+        # else:
+        #     q_max = q_m_val
+        
+        # d_quant = q_max / (2 ** (bit_width - 1) - 1)
         return d_quant
 
     def _quantize_helper(self, weight, d_quant, q_m, t_quant=None):

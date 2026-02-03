@@ -59,7 +59,10 @@ class SymQuantizerNonLinear(torch.autograd.Function):
         ctx.save_for_backward(input, d_quant, q_m, t_quant, clip_val, q_s)
 
         # q_m <= q_s can happen
-        range_pow = torch.exp(t_quant * torch.log(torch.abs(q_m - q_s) + 1e-6))
+        eps = 1e-6
+        # base = (input_abs - q_s).clamp_min(eps)
+        # input_pow = torch.exp(t_quant * torch.log(base))
+        range_pow = torch.exp(t_quant * torch.log(torch.abs(q_m - q_s) + eps))
         input_pow = torch.exp(t_quant * torch.log(input_abs - q_s))  # input_abs >= q_s
 
         output = d_quant * torch.round(input_pow.div(d_quant))

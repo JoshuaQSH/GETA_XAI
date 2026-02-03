@@ -1,0 +1,44 @@
+# BERT SQuAD GETA Experiment Configuration
+# ==========================================
+# BERT-base SQuAD v2.0 with GETA optimizer for joint pruning and quantization
+
+# Dataset Configuration
+dataset:
+  root: '../datasets'
+  batch_size: 16  # Smaller batch size for BERT
+  num_workers: 4
+  max_seq_length: 384
+  doc_stride: 128
+
+# Training Configuration
+training:
+  epochs: 10
+  lr: 3.0e-5  # AdamW learning rate
+  lr_quant: 3.0e-5
+  weight_decay: 1.0e-2
+  lr_step_size: 5
+  lr_gamma: 0.1
+
+# GETA/Quantization Configuration
+geta:
+  target_sparsity: 0.1  # Can be 0.1, 0.3, 0.5, 0.7
+  bit_reduction: 2
+  min_bit: 4
+  max_bit: 8  # Lower max bit for BERT (q_m = 8)
+  exponential_t: 1.0
+
+# Stage Configuration (in epochs)
+stages:
+  start_projection_step: 0
+  projection_periods: 4
+  projection_epochs: 1
+  pruning_periods: 6
+  pruning_epochs: 6
+
+# Device Configuration
+device: 'cuda:0'
+
+# Output Configuration
+output:
+  dir: './outputs'
+  experiment_name: ''  # Auto-generated if empty

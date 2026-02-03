@@ -1,0 +1,42 @@
+# ResNet20 CIFAR-10 GETA Experiment Configuration
+# ================================================
+# ResNet20 CIFAR-10 with GETA optimizer for joint pruning and quantization
+
+# Dataset Configuration
+dataset:
+  root: '../datasets'
+  batch_size: 64
+  num_workers: 4
+
+# Training Configuration
+training:
+  epochs: 350
+  lr: 1.0e-3  # SGD learning rate
+  lr_quant: 1.0e-3
+  weight_decay: 1.0e-4
+  lr_step_size: 50
+  lr_gamma: 0.1
+
+# GETA/Quantization Configuration
+geta:
+  target_sparsity: 0.35
+  bit_reduction: 2
+  min_bit: 4
+  max_bit: 16
+  exponential_t: 1.0
+
+# Stage Configuration (in epochs)
+stages:
+  start_projection_step: 0
+  projection_periods: 7
+  projection_epochs: 35
+  pruning_periods: 5
+  pruning_epochs: 30
+
+# Device Configuration
+device: 'cuda:0'
+
+# Output Configuration
+output:
+  dir: './outputs'
+  experiment_name: ''  # Auto-generated if empty

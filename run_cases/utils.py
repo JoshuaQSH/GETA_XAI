@@ -694,13 +694,13 @@ def get_timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def generate_experiment_name(optimizer_type: str, config: ExperimentConfig) -> str:
+def generate_experiment_name(optimizer_type: str, config: ExperimentConfig, model_name: str = "vgg7_cifar10") -> str:
     """Generate experiment name from configuration."""
     if config.experiment_name:
         return config.experiment_name
     
     name_parts = [
-        f"vgg7_cifar10_{optimizer_type.lower()}",
+        f"{model_name}_{optimizer_type.lower()}",
         f"sp{config.target_sparsity}",
         f"ep{config.epochs}"
     ]

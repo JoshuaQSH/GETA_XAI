@@ -625,7 +625,15 @@ class GETA(BaseHybridSparseOptimizer):
                     if "q_m_wt" in p_name:
                         q_m_wt = p.data
 
-            # Calculate bounds for this layer
+            # [DEBUG] Calculate bounds for this layer
+            if not hasattr(self, "_dbg_once"):
+                self._dbg_once = True
+                print("DBG _d_quant_helper inputs:",
+                    "bit_width", self.max_bit_wt,
+                    "q_m_wt type", type(q_m_wt),
+                    "q_m_wt", q_m_wt,
+                    "t_quant_wt type", type(t_quant_wt),
+                    "t_quant_wt", t_quant_wt)
             d_quant_min = self._d_quant_helper(self.max_bit_wt, q_m_wt, t_quant_wt)
             d_quant_max = self._d_quant_helper(self.min_bit_wt, q_m_wt, t_quant_wt)
 
@@ -761,24 +769,94 @@ class GETA(BaseHybridSparseOptimizer):
 
         return bit_width
 
+    # @staticmethod
+    # # Original May overflows if `t_quant * log(q_m)` is large (e.g., large `t_quant`, or large `q_m`).
+    # def _d_quant_helper(bit_width, q_m, t_quant):
+    #     """Calculate d_quant, using max absolute value of q_m for uniform quantization."""
+    #     if t_quant is None:
+    #         t_quant = 1.0
+
+    #     # breakpoint()
+    #     # Get maximum absolute value if q_m is a tensor
+    #     if isinstance(q_m, torch.Tensor):
+    #         q_m = torch.max(torch.abs(q_m)).item()
+    #     else:
+    #         q_m = abs(q_m)
+    #     # Prevent exact zero
+    #     q_m = max(abs(q_m), 1e-10)
+
+    #     # Calculate d_quant using scalar math
+    #     # d_quant = math.exp(t_quant * math.log(q_m)) / (2 ** (bit_width - 1) - 1)
+    #     # d_quant = math.exp(t_quant * math.log(abs(q_m))) / (2 ** (bit_width - 1) - 1)
+        
+    #     # Optional: keep t non-negative and within a sane range
+    #     t_quant = float(t_quant)
+    #     if not math.isfinite(t_quant):
+    #         t_quant = 1.0
+    #     t_quant = min(max(t_quant, 0.0), 8.0)
+        
+    #     denom = float(2 ** (bit_width - 1) - 1)
+    #     log_d = t_quant * math.log(q_m) - math.log(denom)
+        
+    #     if not math.isfinite(log_d):
+    #         log_d = 80.0
+    #     log_d = min(log_d, 80.0)
+        
+    #     d_quant = math.exp(log_d)
+        
+    #     return d_quant
+    
     @staticmethod
-    def _d_quant_helper(bit_width, q_m, t_quant):
-        """Calculate d_quant, using max absolute value of q_m for uniform quantization."""
-        if t_quant is None:
-            t_quant = 1.0
+    def _d_quant_helper(bit_width, q_m, t_quant, *, eps_qm=1e-10, t_cap=8.0, log_cap=80.0, qm_cap=1e10):
+        """
+        Safe d_quant computation for GETA:
 
-        # Get maximum absolute value if q_m is a tensor
+            d_quant = exp(t * log(|q_m|)) / (2^(bit-1) - 1)
+
+        Uses torch for log/abs/clamp to avoid Python math overflow/domain errors.
+        """
+
+        # Make sure bit_width is a small Python int
+        bit_width = int(bit_width)
+        if bit_width < 2:
+            bit_width = 2  # avoid denom=0
+        if bit_width > 32:
+            # If this ever triggers, something upstream is wrong (bit_width shouldn't be huge)
+            bit_width = 32
+
+        denom = float(2 ** (bit_width - 1) - 1)
+
+        # Convert q_m to a scalar tensor safely
         if isinstance(q_m, torch.Tensor):
-            q_m = torch.max(torch.abs(q_m)).item()
+            # q_m_wt is often a scalar tensor, but be robust
+            q_m_t = torch.max(torch.abs(q_m.detach())).to(dtype=torch.float64, device="cpu")
         else:
-            q_m = abs(q_m)
-        # Prevent exact zero
-        q_m = max(abs(q_m), 1e-10)
+            q_m_t = torch.tensor(abs(float(q_m)), dtype=torch.float64)
 
-        # Calculate d_quant using scalar math
-        # d_quant = math.exp(t_quant * math.log(q_m)) / (2 ** (bit_width - 1) - 1)
-        d_quant = math.exp(t_quant * math.log(abs(q_m))) / (2 ** (bit_width - 1) - 1)
-        return d_quant
+        # Prevent log(0) and crazy magnitudes
+        q_m_t = torch.clamp(q_m_t, min=eps_qm, max=qm_cap)
+
+        # Convert t_quant to scalar tensor safely
+        if t_quant is None:
+            t_t = torch.tensor(1.0, dtype=torch.float64)
+        elif isinstance(t_quant, torch.Tensor):
+            t_t = t_quant.detach().to(dtype=torch.float64, device="cpu")
+        else:
+            t_t = torch.tensor(float(t_quant), dtype=torch.float64)
+
+        # Keep t in a sane range
+        t_t = torch.clamp(t_t, 0.0, t_cap)
+
+        # log(d_quant) = t*log(q_m) - log(denom)
+        log_d = t_t * torch.log(q_m_t) - math.log(denom)
+
+        # Cap exponent to avoid exp overflow (exp(80) ~ 5e34)
+        log_d = torch.clamp(log_d, max=log_cap)
+
+        d = torch.exp(log_d)
+
+        # Return python float
+        return float(d.item())
 
     @staticmethod
     def _quantize_helper(weight, d_quant, q_m, t_quant):
