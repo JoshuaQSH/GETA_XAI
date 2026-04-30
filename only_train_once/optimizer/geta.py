@@ -410,6 +410,7 @@ class GETA(BaseHybridSparseOptimizer):
                 )
             else:
                 # TODO: @xiaoyi, refactor
+                forget_rate = 0.0  # Safe default to avoid UnboundLocalError
                 if self.verbose == "True":
                     self.logger.warning(
                         f"Unexpected cosine_similarity_clip value: {cosine_similarity_clip}"
@@ -567,6 +568,11 @@ class GETA(BaseHybridSparseOptimizer):
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr_quant"]
                 )
+                # Clamp quantization params to valid ranges
+                if "q_m" in p_name:
+                    p.data.clamp_(min=1e-6)  # q_m must be positive
+                elif "d_quant" in p_name:
+                    p.data.clamp_(min=1e-8)  # d_quant must be positive
             else:
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr"]
@@ -601,6 +607,11 @@ class GETA(BaseHybridSparseOptimizer):
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr_quant"]
                 )
+                # Clamp quantization params to valid ranges
+                if "q_m_wt" in p_name:
+                    p.data.clamp_(min=1e-6)  # q_m must be positive
+                elif "d_quant_wt" in p_name:
+                    p.data.clamp_(min=1e-8)  # d_quant must be positive
             else:
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr"]
@@ -680,6 +691,11 @@ class GETA(BaseHybridSparseOptimizer):
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr_quant"]
                 )
+                # Clamp activation quantization params to valid ranges
+                if "q_m_act" in p_name:
+                    p.data.clamp_(min=1e-6)  # q_m must be positive
+                elif "d_quant_act" in p_name:
+                    p.data.clamp_(min=1e-8)  # d_quant must be positive
 
         # Find layers in each param_group
         layer_name_list = []

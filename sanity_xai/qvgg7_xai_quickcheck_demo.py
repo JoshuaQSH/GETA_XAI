@@ -1,7 +1,8 @@
 """
 XAI-GETA Quick Check Demo
 =========================
-Fast verification that ALL FOUR stages work correctly with MULTIPLE attribution methods:
+Fast verification that all four stages work correctly with layer-aware
+structured attribution methods:
 1. Warmup Stage
 2. Projection Stage  
 3. Joint Pruning & Quantization Stage
@@ -27,28 +28,17 @@ from only_train_once.transform import tensor_transformation
 from only_train_once.quantization.quant_model import model_to_quantize_model
 from only_train_once.quantization.quant_layers import QuantizationMode
 
-# Import incompatible methods list from captum_attribution
-from only_train_once.xai_optimizer.captum_attribution import QUANTIZATION_INCOMPATIBLE_METHODS
+from only_train_once.xai_optimizer.captum_attribution import (
+    QUANTIZATION_INCOMPATIBLE_METHODS,
+    SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS,
+)
 
 
 # Attribution methods to test
-ATTRIBUTION_METHODS = [
-    'saliency',
-    'input_x_gradient',
-    'guided_backprop',
-    'deconvolution',
-    'layer_conductance',
-    'layer_gradient_x_activation',
-    'layer_integrated_gradients',
-    'deep_lift',
-    'integrated_gradients',
-    'lrp',
-    'layer_lrp',
-    'gradient_shap',
-]
+ATTRIBUTION_METHODS = list(SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS)
 
 # Methods that require inplace=False for ReLU
-LRP_METHODS = ['lrp', 'layer_lrp', 'guided_backprop', 'deconvolution']
+LRP_METHODS = ['lrp', 'layer_lrp']
 
 # Very slow methods (skip by default)
 SLOW_METHODS = ['gradient_shap']
@@ -540,7 +530,7 @@ def run_all_methods_test(include_slow=False):
     
     # Group by category
     categories = {
-        'Gradient-Based (Fast)': ['saliency', 'input_x_gradient', 'guided_backprop', 'deconvolution'],
+        'Gradient-Based (Fast)': ['saliency', 'input_x_gradient'],
         'Layer-Specific': ['layer_conductance', 'layer_gradient_x_activation', 'layer_integrated_gradients'],
         'Path-Based': ['deep_lift', 'integrated_gradients'],
         'Decomposition (LRP)': ['lrp', 'layer_lrp'],

@@ -9,6 +9,7 @@ dependencies = [
     "transformers",
     "torchvision",
     "torchaudio",
+    "torchtext",
     "numpy",
     "captum",
     "opencv-python",

@@ -11,8 +11,6 @@ Usage:
 Available Attribution Methods:
     - saliency
     - input_x_gradient
-    - guided_backprop
-    - deconvolution
     - layer_conductance
     - layer_gradient_x_activation
     - layer_integrated_gradients
@@ -20,6 +18,7 @@ Available Attribution Methods:
     - integrated_gradients
     - lrp
     - layer_lrp
+    - gradient_shap
 
 Experimental Setup:
 - Bit width reduction: b_r = 2
@@ -44,7 +43,8 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -69,6 +69,69 @@ from run_cases.utils import (
 )
 
 
+class RobustImageFolder(Dataset):
+    """ImageFolder wrapper that handles corrupted images gracefully."""
+    
+    def __init__(self, root, transform=None):
+        self.dataset = ImageFolder(root=root, transform=None)
+        self.transform = transform
+        self.valid_indices = []
+        self.corrupted_files = []
+        
+        # Pre-validate images (optional, can be slow for large datasets)
+        # For now, we'll handle errors during __getitem__
+        self.valid_indices = list(range(len(self.dataset)))
+    
+    def __len__(self):
+        return len(self.valid_indices)
+    
+    def __getitem__(self, idx):
+        actual_idx = self.valid_indices[idx]
+        path, target = self.dataset.samples[actual_idx]
+        
+        try:
+            # Try to load the image
+            with open(path, 'rb') as f:
+                img = Image.open(f)
+                img = img.convert('RGB')  # Ensure RGB format
+            
+            if self.transform is not None:
+                img = self.transform(img)
+            
+            return img, target
+            
+        except Exception as e:
+            # Log the corrupted file
+            if path not in self.corrupted_files:
+                self.corrupted_files.append(path)
+                print(f"Warning: Skipping corrupted image: {path} ({type(e).__name__})")
+            
+            # Return a random valid sample instead
+            # Find another valid index
+            for fallback_idx in range(len(self.valid_indices)):
+                if fallback_idx != idx:
+                    try:
+                        fallback_actual = self.valid_indices[fallback_idx]
+                        fallback_path, fallback_target = self.dataset.samples[fallback_actual]
+                        with open(fallback_path, 'rb') as f:
+                            img = Image.open(f)
+                            img = img.convert('RGB')
+                        if self.transform is not None:
+                            img = self.transform(img)
+                        return img, fallback_target
+                    except:
+                        continue
+            
+            # If all else fails, return a black image with label 0
+            if self.transform is not None:
+                # Create a dummy black image
+                dummy = Image.new('RGB', (224, 224), (0, 0, 0))
+                dummy = self.transform(dummy)
+                return dummy, 0
+            else:
+                return Image.new('RGB', (224, 224), (0, 0, 0)), 0
+
+
 def get_imagenet_loaders(config: ExperimentConfig) -> tuple:
     """Load ImageNet dataset and return train/test loaders."""
 
@@ -85,13 +148,24 @@ def get_imagenet_loaders(config: ExperimentConfig) -> tuple:
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
+    
+    # trainset = ImageFolder(
+    #     root=os.path.join(config.dataset_root, 'ImageNet', 'train'),
+    #     transform=train_transform
+    # )
 
-    trainset = ImageFolder(
+    # testset = ImageFolder(
+    #     root=os.path.join(config.dataset_root, 'ImageNet', 'val'),
+    #     transform=test_transform
+    # )
+
+    # Use RobustImageFolder to handle corrupted images
+    trainset = RobustImageFolder(
         root=os.path.join(config.dataset_root, 'ImageNet', 'train'),
         transform=train_transform
     )
 
-    testset = ImageFolder(
+    testset = RobustImageFolder(
         root=os.path.join(config.dataset_root, 'ImageNet', 'val'),
         transform=test_transform
     )
@@ -121,10 +195,10 @@ def create_quantized_resnet50(device: str = 'cuda:0') -> tuple:
     from only_train_once.quantization.quant_model import model_to_quantize_model
     from only_train_once.quantization.quant_layers import QuantizationMode
 
-    model = models.resnet50(pretrained=True)
+    model = models.resnet50(weights='ResNet50_Weights.DEFAULT')
     model = model_to_quantize_model(
         model,
-        quant_mode=QuantizationMode.WEIGHT_AND_ACTIVATION,
+        quant_mode=QuantizationMode.WEIGHT_ONLY,  # Only weight quantization supported by optimizer
         q_m_init=1.0,  # Use default q_m to avoid overflow
     )
     dummy_input = torch.rand(1, 3, 224, 224)
@@ -167,7 +241,7 @@ def train_xai_geta(
     optimizer = XAI_GETA(
         params=param_groups,
         model=model,  # Pass model for Captum attribution
-        variant="adam",
+        variant="sgd",
         lr=config.lr,
         lr_quant=config.lr_quant,
         first_momentum=0.9,
@@ -266,7 +340,7 @@ def train_xai_geta(
             epoch_loss += loss.item()
             
             # XAI-GETA step (includes attribution-based importance)
-            optimizer.step()
+            optimizer.step(inputs=X, targets=y)
             
             pbar.set_postfix({'loss': loss.item()})
         

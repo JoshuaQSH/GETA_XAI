@@ -137,6 +137,7 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         # Cached attribution scores
         self._cached_attributions: Dict[str, torch.Tensor] = {}
         self._initial_attributions_computed = False
+        self._attribution_layer_names: List[str] = []
         
         # Initialize Captum calculator if model is provided
         self.captum_calculator = None
@@ -153,16 +154,19 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         
         # Set up importance score criteria
         if importance_score_criteria == "default":
-            if self.captum_calculator is not None:
-                # Use attribution as part of the criteria
+            if self.captum_calculator is not None and attribution_weight > 0:
+                # Use attribution as part of the criteria (only when weight > 0)
                 self.importance_score_criteria = {
                     "attribution": attribution_weight,
-                    "magnitude": (1.0 - attribution_weight) * 0.3,
-                    "taylor_first_order": (1.0 - attribution_weight) * 0.4,
-                    "cosine_similarity": (1.0 - attribution_weight) * 0.3,
+                    "magnitude": (1.0 - attribution_weight) * 0.2,
+                    "avg_magnitude": (1.0 - attribution_weight) * 0.2,
+                    "cosine_similarity": (1.0 - attribution_weight) * 0.2,
+                    "taylor_first_order": (1.0 - attribution_weight) * 0.2,
+                    "taylor_second_order": (1.0 - attribution_weight) * 0.2,
                 }
             else:
-                # Fallback to original GETA criteria
+                # Fallback to original GETA criteria (exact same as GETA)
+                # This ensures attribution_weight=0 produces identical behavior to GETA
                 self.importance_score_criteria = {
                     "magnitude": 0.2,
                     "avg_magnitude": 0.2,
@@ -199,6 +203,9 @@ class XAI_GETA(BaseHybridSparseOptimizer):
             param_group["pruned_idxes"] = list()
             param_group["importance_scores"] = dict()
             param_group["lr_quant"] = lr_quant
+
+        if self.captum_calculator is not None:
+            self._attribution_layer_names = self._collect_attribution_layer_names()
         
         # Set up active number redundant groups for each pruning period
         self.active_num_redundant_groups = list()
@@ -215,6 +222,20 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 groups_sum += self.target_num_redundant_groups // self.pruning_periods
         
         self.logger.info(f"XAI_GETA initialized with criteria: {self.importance_score_criteria}")
+
+    def _collect_attribution_layer_names(self) -> List[str]:
+        """Collect layer names that correspond to prunable optimizer groups."""
+        layer_names = []
+        for group in self.param_groups:
+            if not group["is_prunable"] or group["is_auxiliary"]:
+                continue
+            for p_name in group["p_names"]:
+                parts = p_name.rsplit(".", 1)
+                if len(parts) != 2 or parts[1] not in {"weight", "bias"}:
+                    continue
+                layer_name = self.captum_calculator.get_layer_from_param(p_name) or parts[0]
+                layer_names.append(layer_name)
+        return sorted(set(layer_names))
 
     def compute_initial_attributions(
         self,
@@ -238,36 +259,38 @@ class XAI_GETA(BaseHybridSparseOptimizer):
             return
         
         self.logger.info("Computing initial attribution scores...")
+        was_training = self._model.training
         self._model.eval()
         
         attribution_accumulator: Dict[str, List[torch.Tensor]] = {}
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(dataloader):
-                if batch_idx >= num_batches:
-                    break
-                
-                if isinstance(batch, dict):
-                    X = batch['pixel_values'].to(self.device)
-                    y = batch['labels'].to(self.device)
+
+        for batch_idx, batch in enumerate(dataloader):
+            if batch_idx >= num_batches:
+                break
+
+            if isinstance(batch, dict):
+                X = batch['pixel_values'].to(self.device)
+                y = batch['labels'].to(self.device)
+            else:
+                X, y = batch
+                X = X.to(self.device)
+                y = y.to(self.device)
+
+            attributions = self.captum_calculator.compute_all_layer_attributions(
+                X,
+                y,
+                layer_names=self._attribution_layer_names or None,
+            )
+
+            for layer_name, attr in attributions.items():
+                if attr.dim() >= 2:
+                    attr_aggregated = attr.abs().sum(dim=0) / attr.shape[0]
                 else:
-                    X, y = batch
-                    X = X.to(self.device)
-                    y = y.to(self.device)
-                
-                # Compute attributions for this batch
-                attributions = self.captum_calculator.compute_all_layer_attributions(X, y)
-                
-                for layer_name, attr in attributions.items():
-                    # Aggregate along batch dimension to get consistent shape
-                    if attr.dim() >= 2:
-                        attr_aggregated = attr.abs().sum(dim=0) / attr.shape[0]
-                    else:
-                        attr_aggregated = attr.abs()
-                    
-                    if layer_name not in attribution_accumulator:
-                        attribution_accumulator[layer_name] = []
-                    attribution_accumulator[layer_name].append(attr_aggregated.detach().cpu())
+                    attr_aggregated = attr.abs()
+
+                if layer_name not in attribution_accumulator:
+                    attribution_accumulator[layer_name] = []
+                attribution_accumulator[layer_name].append(attr_aggregated.detach().cpu())
         
         # Average attributions across batches
         for layer_name, attrs in attribution_accumulator.items():
@@ -280,7 +303,7 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 self._cached_attributions[layer_name] = attrs[-1].to(self.device)
         
         self._initial_attributions_computed = True
-        self._model.train()
+        self._model.train(was_training)
         self.logger.info(f"Computed initial attributions for {len(self._cached_attributions)} layers")
 
     def update_attributions(
@@ -301,7 +324,9 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         try:
             # Compute new attributions
             new_attributions = self.captum_calculator.compute_all_layer_attributions(
-                inputs, targets
+                inputs,
+                targets,
+                layer_names=self._attribution_layer_names or None,
             )
             
             # Update cache with EMA - aggregate to remove batch dimension first
@@ -394,27 +419,86 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 self.global_scores.append(group["importance_scores"]["overall"])
 
     def identify_redundant_groups(self):
-        """Identify redundant groups based on global importance scores."""
+        """Match GETA's redundancy selection so attribution_weight=0 stays comparable."""
         global_importance_scores = torch.cat(self.global_scores, dim=0)
-        _, sorted_idx = torch.sort(global_importance_scores, descending=False)
-        
-        redundant_group_idxes = sorted_idx[:self.target_num_redundant_groups].cpu().numpy()
-        
+        curr_active_num_redundant_groups = self.active_num_redundant_groups[
+            self.curr_pruning_period
+        ]
+        curr_K = len(self.pruned_group_idxes) + curr_active_num_redundant_groups
+        _, top_indices = torch.topk(-global_importance_scores, curr_K)
+        top_indices = top_indices.cpu().numpy()
+        top_indices = np.setdiff1d(top_indices, self.pruned_group_idxes)[
+            :curr_active_num_redundant_groups
+        ].tolist()
+        self.pruned_group_idxes.extend(top_indices)
+
         for group in self.param_groups:
             if group["is_prunable"] and not group["is_auxiliary"]:
-                global_idxes = group["global_idxes"]
-                group_redundant_mask = np.isin(global_idxes, redundant_group_idxes)
-                group["active_redundant_idxes"] = np.where(group_redundant_mask)[0].tolist()
-                group["important_idxes"] = np.where(~group_redundant_mask)[0].tolist()
+                global_active_redundant_idx = np.intersect1d(
+                    top_indices, group["global_idxes"]
+                )
+                group["active_redundant_idxes"] = (
+                    global_active_redundant_idx - group["global_start_idx"]
+                ).tolist()
+                if group["num_groups"] < self.group_divisible:
+                    group["active_redundant_idxes"].clear()
+                    group["pruned_idxes"].clear()
+                else:
+                    curr_num_important_groups = len(group["important_idxes"])
+                    trial_num_important_groups = curr_num_important_groups - len(
+                        group["active_redundant_idxes"]
+                    )
+                    if (
+                        trial_num_important_groups % self.group_divisible != 0
+                        or trial_num_important_groups <= 0
+                    ):
+                        ratio = trial_num_important_groups // self.group_divisible + 1
+                        refined_num_important_groups = None
+                        if ratio <= 1 or trial_num_important_groups == 0:
+                            refined_num_important_groups = max(
+                                int(self.group_divisible), 1
+                            )
+                        else:
+                            refined_num_important_groups = max(
+                                int(ratio * self.group_divisible),
+                                int(self.group_divisible),
+                            )
+                        refined_num_important_groups = min(
+                            group["num_groups"], refined_num_important_groups
+                        )
+                        refined_num_active_redundant_groups = (
+                            group["num_groups"]
+                            - len(group["pruned_idxes"])
+                            - refined_num_important_groups
+                        )
+                        self.target_num_redundant_groups += (
+                            refined_num_active_redundant_groups
+                            - len(group["active_redundant_idxes"])
+                        )
+                        group["active_redundant_idxes"] = group[
+                            "active_redundant_idxes"
+                        ][:refined_num_active_redundant_groups]
+                group["important_idxes"] = [
+                    i
+                    for i in group["important_idxes"]
+                    if (
+                        i not in group["active_redundant_idxes"]
+                        and i not in group["pruned_idxes"]
+                    )
+                ]
 
     def commit_redundant_idxes(self):
-        """Commit active redundant indices to pruned indices."""
+        """Commit active redundant indices exactly as GETA does."""
         for group in self.param_groups:
             if group["is_prunable"] and not group["is_auxiliary"]:
-                group["pruned_idxes"] = list(
-                    set(group["pruned_idxes"] + group["active_redundant_idxes"])
-                )
-                group["active_redundant_idxes"] = []
+                group["pruned_idxes"].extend(group["active_redundant_idxes"].copy())
+                group["active_redundant_idxes"].clear()
+                group["important_idxes"] = [
+                    i
+                    for i in range(group["num_groups"])
+                    if i not in group["pruned_idxes"]
+                ]
+                group["importance_scores"].clear()
 
     def step(self, closure=None, inputs=None, targets=None):
         """
@@ -501,6 +585,9 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                         p.data.add_(
                             group["grad_variant"][p_name], alpha=-group["lr_quant"]
                         )
+                        # Clamp quantization params to valid ranges
+                        if "q_m_wt" in p_name:
+                            p.data.clamp_(min=1e-6)
 
                 active_redundant_idxes = group["active_redundant_idxes"]
 
@@ -516,7 +603,9 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 ):
                     if "d_quant_wt" in p_name:
                         with torch.no_grad():
-                            group["params"][i].copy_(d_quant)
+                            # Ensure d_quant is positive
+                            safe_d_quant = max(d_quant, 1e-8) if isinstance(d_quant, float) else d_quant.clamp(min=1e-8)
+                            group["params"][i].copy_(safe_d_quant)
 
                 for p_name, p, p_transform in zip(
                     group["p_names"], group["params"], group["p_transform"]
@@ -589,6 +678,11 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr_quant"]
                 )
+                # Clamp quantization params to valid ranges
+                if "q_m" in p_name:
+                    p.data.clamp_(min=1e-6)  # q_m must be positive
+                elif "d_quant" in p_name:
+                    p.data.clamp_(min=1e-8)  # d_quant must be positive
             else:
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr"]
@@ -762,34 +856,45 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         if cosine_similarity_res >= 0.0 or forget_rate == 0.0:
             d_quant = d_quant_upper
         else:
-            d_quant = (
-                -zeta
-                * eta
-                * param_group["lr"]
-                * flatten_grad_norm
-                / (forget_rate * cosine_similarity_res * flatten_res_norm + eps)
-            )
-            # Safeguard: if d_quant is negative or non-finite, use d_quant_upper
-            # Handle both tensor and scalar cases
-            if isinstance(d_quant, torch.Tensor):
-                d_quant_val = d_quant.item()
-            else:
-                d_quant_val = d_quant
+            # Compute denominator without eps to preserve sign semantics (matching GETA)
+            # When cosine_similarity_res < 0 and forget_rate > 0:
+            # denominator = (positive * negative * positive) = negative
+            # d_quant = -positive / negative = positive (correct!)
+            denominator = forget_rate * cosine_similarity_res * flatten_res_norm
             
-            if d_quant_val <= 0 or not np.isfinite(d_quant_val):
+            # Add safeguard for near-zero denominator
+            if abs(denominator) < eps:
                 d_quant = d_quant_upper
             else:
-                # Add max iterations to prevent infinite loop
-                # Use scalar value for comparison
-                max_iters = 100
-                iters = 0
-                d_quant = d_quant_val  # Convert to scalar for loop
-                while d_quant < d_quant_lower and iters < max_iters:
-                    forget_rate = forget_rate * 0.8
-                    d_quant = d_quant / 0.8
-                    iters += 1
-                if iters >= max_iters:
-                    d_quant = d_quant_lower  # Use lower bound if loop didn't converge
+                d_quant = (
+                    -zeta
+                    * eta
+                    * param_group["lr"]
+                    * flatten_grad_norm
+                    / denominator
+                )
+                
+                # Safeguard: if d_quant is negative or non-finite, use d_quant_upper
+                # Handle both tensor and scalar cases
+                if isinstance(d_quant, torch.Tensor):
+                    d_quant_val = d_quant.item()
+                else:
+                    d_quant_val = d_quant
+                
+                # Check for NaN, inf, or negative values
+                if not np.isfinite(d_quant_val) or d_quant_val <= 0:
+                    d_quant = d_quant_upper
+                else:
+                    # Add max iterations to prevent infinite loop
+                    max_iters = 100
+                    iters = 0
+                    d_quant = d_quant_val  # Convert to scalar for loop
+                    while d_quant < d_quant_lower and iters < max_iters:
+                        forget_rate = forget_rate * 0.8
+                        d_quant = d_quant / 0.8
+                        iters += 1
+                    if iters >= max_iters:
+                        d_quant = d_quant_lower  # Use lower bound if loop didn't converge
             d_quant = min(d_quant_upper, d_quant)
 
         return forget_rate, d_quant
@@ -873,6 +978,11 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr_quant"]
                 )
+                # Clamp quantization params to valid ranges
+                if "q_m_wt" in p_name:
+                    p.data.clamp_(min=1e-6)  # q_m must be positive
+                elif "d_quant_wt" in p_name:
+                    p.data.clamp_(min=1e-8)  # d_quant must be positive
             else:
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr"]
@@ -930,6 +1040,11 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr_quant"]
                 )
+                # Clamp quantization params to valid ranges
+                if "q_m_wt" in p_name:
+                    p.data.clamp_(min=1e-6)  # q_m must be positive
+                elif "d_quant_wt" in p_name:
+                    p.data.clamp_(min=1e-8)  # d_quant must be positive
             else:
                 p.data.add_(
                     param_group["grad_variant"][p_name], alpha=-param_group["lr"]

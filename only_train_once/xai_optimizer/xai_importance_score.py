@@ -85,6 +85,14 @@ def compute_attribution_importance(
             scores = torch.abs(attribution_tensor).mean(dim=(0, 2, 3))
         else:
             scores = torch.abs(attribution_tensor).amax(dim=(0, 2, 3))
+    elif attribution_tensor.dim() == 3:
+        # Aggregated Conv2d attribution: [channels, H, W]
+        if aggregation == "sum_abs":
+            scores = torch.abs(attribution_tensor).sum(dim=(1, 2))
+        elif aggregation == "mean_abs":
+            scores = torch.abs(attribution_tensor).mean(dim=(1, 2))
+        else:
+            scores = torch.abs(attribution_tensor).amax(dim=(1, 2))
     elif attribution_tensor.dim() == 2:
         # Linear: [batch, features]
         if aggregation == "sum_abs":
@@ -93,6 +101,8 @@ def compute_attribution_importance(
             scores = torch.abs(attribution_tensor).mean(dim=0)
         else:
             scores = torch.abs(attribution_tensor).amax(dim=0)
+    elif attribution_tensor.dim() == 1:
+        scores = torch.abs(attribution_tensor)
     else:
         # Flatten for other cases
         scores = torch.abs(attribution_tensor.flatten())
@@ -123,41 +133,56 @@ def _importance_score_by_attribution(
     Compute importance scores using Captum attributions.
     
     Uses cached attributions if available, otherwise falls back to magnitude-based scoring.
+    Attribution scores are normalized relative to magnitude scores for better calibration.
     """
     num_groups = param_group["num_groups"]
     device = param_group["params"][0].device if param_group["params"] else "cpu"
     
+    # First compute magnitude-based scores for normalization reference
+    mag_norm_group = None
+    for param, p_transform in zip(param_group['params'], param_group['p_transform']):
+        if p_transform == TensorTransform.NO_PRUNE:
+            continue
+        param_transform = tensor_transformation_param_group(param.data, p_transform, param_group)
+        if mag_norm_group is None:
+            mag_norm_group = torch.norm(param_transform, dim=1) ** 2
+        else:
+            mag_norm_group += torch.norm(param_transform, dim=1) ** 2
+    
+    if mag_norm_group is not None:
+        mag_scores = torch.sqrt(mag_norm_group)
+    else:
+        mag_scores = None
+    
     # Try to get attribution from cache
     if cached_attributions is not None:
-        # Find the layer name from param_group
-        layer_name = None
+        layer_names = []
         for p_name in param_group["p_names"]:
-            # Extract layer name (e.g., "features.0.weight" -> "features.0")
             parts = p_name.rsplit('.', 1)
             if len(parts) == 2 and parts[1] in ['weight', 'bias']:
-                layer_name = parts[0]
-                break
-        
-        if layer_name and layer_name in cached_attributions:
-            attr_tensor = cached_attributions[layer_name]
-            scores = compute_attribution_importance(param_group, attr_tensor)
+                layer_names.append(parts[0])
+
+        unique_layer_names = list(dict.fromkeys(layer_names))
+        layer_scores = []
+        for layer_name in unique_layer_names:
+            if layer_name in cached_attributions:
+                attr_tensor = cached_attributions[layer_name]
+                layer_scores.append(compute_attribution_importance(param_group, attr_tensor))
+
+        if layer_scores:
+            scores = torch.stack(layer_scores).mean(dim=0)
+
+            if mag_scores is not None and scores.sum() > 1e-8:
+                attr_scale = mag_scores.sum() / (scores.sum() + 1e-8)
+                scores = scores * attr_scale
+
             param_group['importance_scores']['attribution'] = scores
             return
     
     # Fallback: use magnitude-based approximation
     # This ensures we always have a score even without attributions
-    norm_group = None
-    for param, p_transform in zip(param_group['params'], param_group['p_transform']):
-        if p_transform == TensorTransform.NO_PRUNE:
-            continue
-        param_transform = tensor_transformation_param_group(param.data, p_transform, param_group)
-        if norm_group is None:
-            norm_group = torch.norm(param_transform, dim=1) ** 2
-        else:
-            norm_group += torch.norm(param_transform, dim=1) ** 2
-    
-    if norm_group is not None:
-        param_group['importance_scores']['attribution'] = torch.sqrt(norm_group)
+    if mag_scores is not None:
+        param_group['importance_scores']['attribution'] = mag_scores
     else:
         param_group['importance_scores']['attribution'] = torch.zeros(num_groups, device=device)
 

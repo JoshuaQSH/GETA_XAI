@@ -1,38 +1,28 @@
 """
-Captum Attribution Calculator for GETA
+Captum attribution helpers for structured pruning in XAI-GETA.
 
-This module wraps PyTorch Captum attribution methods for computing
-layer-wise importance scores for structured pruning.
+The structured pruning signal must align with prunable groups, so all supported
+methods are resolved to layer-aware attributions rather than raw input
+attributions.
 """
 
 import logging
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Callable, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
 
-# Include the attribution methods -> maps to WISDOM
 try:
     from captum.attr import (
-        IntegratedGradients,
-        LayerIntegratedGradients,
-        LayerGradientXActivation,
         LayerConductance,
-        LayerActivation,
-        Saliency,
-        InputXGradient,
-        GuidedBackprop,
-        DeepLift,
         LayerDeepLift,
-        GradientShap,
         LayerGradientShap,
-        LRP,
+        LayerGradientXActivation,
+        LayerIntegratedGradients,
         LayerLRP,
-        Deconvolution,
-        GuidedGradCam,
-        LayerGradCam,
     )
+
     CAPTUM_AVAILABLE = True
     LRP_AVAILABLE = True
 except ImportError as e:
@@ -45,273 +35,291 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-# Methods that require inplace=False on ReLU layers
-LRP_METHODS = ['lrp', 'layer_lrp', 'guided_backprop', 'deconvolution']
 
-# Methods that modify model hooks and need special handling with quantization
-# These methods will use a deep copy of the model to avoid interfering with training
-HOOK_MODIFYING_METHODS = ['guided_backprop']
+LRP_METHODS = ["lrp", "layer_lrp"]
+QUANTIZATION_INCOMPATIBLE_METHODS = ["guided_backprop", "deconvolution"]
 
-# Methods that are truly incompatible with quantization (none currently - we handle guided_backprop with deep copy)
-QUANTIZATION_INCOMPATIBLE_METHODS = []
+SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS = [
+    "saliency",
+    "input_x_gradient",
+    "layer_conductance",
+    "layer_gradient_x_activation",
+    "layer_integrated_gradients",
+    "deep_lift",
+    "integrated_gradients",
+    "gradient_shap",
+    "lrp",
+    "layer_lrp",
+]
+
+UNSUPPORTED_STRUCTURED_ATTRIBUTION_METHODS = [
+    "guided_backprop",
+    "deconvolution",
+    "layer_activation",
+    "layer_gradcam",
+]
+
+STRUCTURED_METHOD_ALIASES = {
+    "saliency": "layer_saliency",
+    "input_x_gradient": "layer_gradient_x_activation",
+    "integrated_gradients": "layer_integrated_gradients",
+    "gradient_shap": "layer_gradient_shap",
+    "lrp": "layer_lrp",
+}
 
 
 class AttributionMethod(Enum):
-    """
-    Supported Captum attribution methods for structured pruning.
-    
-    Categories:
-    -----------
-    1. GRADIENT-BASED (fast, single backward pass):
-       - SALIENCY: Gradient magnitude w.r.t. input
-       - INPUT_X_GRADIENT: Input * gradient (simple sensitivity)
-       - GUIDED_BACKPROP: Modified backprop that only propagates positive gradients
-    
-    2. PATH-BASED (slower, require baseline and integration):
-       - INTEGRATED_GRADIENTS: Path integral from baseline to input
-       - DEEP_LIFT: Difference from reference propagation
-       - GRADIENT_SHAP: SHAP values via gradient sampling
-    
-    3. LAYER-SPECIFIC (compute attribution for specific layers):
-       - LAYER_CONDUCTANCE: How much a layer affects output (like integrated gradients for layers)
-       - LAYER_GRADIENT_X_ACTIVATION: Gradient * activation at a layer
-       - LAYER_INTEGRATED_GRADIENTS: Integrated gradients at layer level
-       - LAYER_ACTIVATION: Raw activations (not attribution, just feature importance)
-       - LAYER_LRP: Layer-wise Relevance Propagation for specific layers
-       - LAYER_GRADCAM: Grad-CAM for layer visualization
-    
-    4. DECOMPOSITION-BASED:
-       - LRP: Layer-wise Relevance Propagation (propagates relevance backward)
-       - DECONVOLUTION: Deconvolution-based visualization
-    
-    NOT INCLUDED:
-    - LayerActivation: Returns raw activations, not attributions. Activations alone don't 
-      measure importance - they need to be combined with gradients or other signals.
-    """
-    # Gradient-based methods (fast)
     SALIENCY = "saliency"
     INPUT_X_GRADIENT = "input_x_gradient"
     GUIDED_BACKPROP = "guided_backprop"
-    
-    # Path-based methods (slower, more accurate)
     INTEGRATED_GRADIENTS = "integrated_gradients"
     DEEP_LIFT = "deep_lift"
     GRADIENT_SHAP = "gradient_shap"
-    
-    # Layer-specific methods
     LAYER_CONDUCTANCE = "layer_conductance"
     LAYER_GRADIENT_X_ACTIVATION = "layer_gradient_x_activation"
     LAYER_INTEGRATED_GRADIENTS = "layer_integrated_gradients"
-    LAYER_ACTIVATION = "layer_activation"  # Raw activations (not true attribution)
+    LAYER_ACTIVATION = "layer_activation"
     LAYER_LRP = "layer_lrp"
     LAYER_GRADCAM = "layer_gradcam"
-    
-    # Decomposition-based methods
     LRP = "lrp"
     DECONVOLUTION = "deconvolution"
 
 
 class CaptumAttributionCalculator:
     """
-    Calculator for structured pruning importance scores using Captum attributions.
-    
-    This class wraps Captum attribution methods to compute per-group importance
-    scores for structured pruning in GETA.
-    
-    Attributes:
-        model: The neural network model
-        attribution_method: Captum method to use
-        baseline_type: Type of baseline for attribution
-        n_steps: Number of steps for integrated gradients methods
-        device: Device to run computations on
+    Compute layer-aware attributions for structured pruning groups.
+
+    User-facing method names such as ``saliency`` and ``integrated_gradients``
+    are mapped to layer-aware variants so the returned tensors align with
+    prunable channels/features instead of the raw model input.
     """
-    
+
     def __init__(
         self,
         model: nn.Module,
-        attribution_method: str = "saliency",  # Changed default to saliency for lower memory
+        attribution_method: str = "saliency",
         baseline_type: str = "zero",
-        n_steps: int = 10,  # Reduced from 20
+        n_steps: int = 10,
         device: str = "cuda",
     ):
-        """
-        Initialize the Captum Attribution Calculator.
-        
-        Args:
-            model: The neural network model
-            attribution_method: Captum method to use (see AttributionMethod)
-            baseline_type: Type of baseline for attribution ("zero", "random", "mean")
-            n_steps: Number of steps for integrated gradients methods
-            device: Device to run computations on
-        """
         if not CAPTUM_AVAILABLE:
             raise RuntimeError("Captum is required. Install with: pip install captum")
-        
+
+        if attribution_method in UNSUPPORTED_STRUCTURED_ATTRIBUTION_METHODS:
+            raise ValueError(
+                f"{attribution_method} is not supported for structured pruning. "
+                f"Use one of: {SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS}"
+            )
+        if attribution_method not in SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS:
+            raise ValueError(
+                f"Unknown attribution method '{attribution_method}'. "
+                f"Supported methods: {SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS}"
+            )
+
         self.model = model
         self.attribution_method = attribution_method
         self.baseline_type = baseline_type
         self.n_steps = n_steps
         self.device = device
         self.logger = logging.getLogger(self.__class__.__name__)
-        
-        # Cache for layer attributors
+
         self._layer_attributors: Dict[str, object] = {}
-        
-        # Build layer name to module mapping
         self._layer_to_module: Dict[str, nn.Module] = {}
         self._param_to_layer: Dict[str, str] = {}
-        self._build_layer_mapping()
-        
-        # Cache for attribution scores
         self._attribution_cache: Dict[str, torch.Tensor] = {}
-        
+        self._build_layer_mapping()
+
     def _build_layer_mapping(self):
-        """Build mapping from layer names to modules and parameters."""
         for name, module in self.model.named_modules():
             self._layer_to_module[name] = module
-            
-        for name, param in self.model.named_parameters():
-            # Extract layer name from parameter name (e.g., "layer1.conv.weight" -> "layer1.conv")
-            parts = name.rsplit('.', 1)
+
+        for name, _param in self.model.named_parameters():
+            parts = name.rsplit(".", 1)
             if len(parts) == 2:
-                layer_name = parts[0]
-                self._param_to_layer[name] = layer_name
-    
+                self._param_to_layer[name] = parts[0]
+
     def _get_layer_module(self, layer_name: str) -> Optional[nn.Module]:
-        """Get the module for a given layer name."""
         return self._layer_to_module.get(layer_name)
-    
+
     def _get_layer_from_param(self, param_name: str) -> Optional[str]:
-        """Get the layer name from a parameter name."""
         return self._param_to_layer.get(param_name)
-    
+
+    def get_layer_from_param(self, param_name: str) -> Optional[str]:
+        return self._get_layer_from_param(param_name)
+
+    def _resolve_structured_method(self, method: str) -> str:
+        return STRUCTURED_METHOD_ALIASES.get(method, method)
+
+    def _forward_model(self, inputs):
+        if isinstance(inputs, dict):
+            return self.model(**inputs)
+        if isinstance(inputs, (tuple, list)):
+            return self.model(*inputs)
+        return self.model(inputs)
+
     def _create_baseline(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        """Create baseline input for attribution methods."""
         if self.baseline_type == "zero":
             return torch.zeros_like(input_tensor)
-        elif self.baseline_type == "random":
+        if self.baseline_type == "random":
             return torch.randn_like(input_tensor) * 0.01
-        elif self.baseline_type == "mean":
+        if self.baseline_type == "mean":
             return torch.ones_like(input_tensor) * input_tensor.mean()
-        else:
-            return torch.zeros_like(input_tensor)
-    
-    def _get_attributor(self, layer_name: str, method: str):
-        """Get or create an attributor for a specific layer."""
-        cache_key = f"{layer_name}_{method}"
-        
-        if cache_key in self._layer_attributors:
-            return self._layer_attributors[cache_key]
-        
+        return torch.zeros_like(input_tensor)
+
+    def _extract_target_score(
+        self,
+        outputs,
+        target: Union[torch.Tensor, int, None],
+    ) -> torch.Tensor:
+        if not torch.is_tensor(outputs):
+            if hasattr(outputs, "logits"):
+                outputs = outputs.logits
+            else:
+                raise ValueError(
+                    "Structured attribution currently requires tensor outputs "
+                    "or outputs with a .logits tensor."
+                )
+
+        if outputs.ndim == 1:
+            return outputs.sum()
+
+        if target is None:
+            return outputs.max(dim=-1).values.sum()
+
+        if isinstance(target, int):
+            return outputs[:, target].sum()
+
+        if not torch.is_tensor(target):
+            raise ValueError("Target must be an int or tensor.")
+
+        target = target.to(outputs.device)
+        if target.ndim == 0:
+            return outputs[:, int(target.item())].sum()
+
+        target = target.long().view(-1, 1)
+        if target.shape[0] != outputs.shape[0]:
+            raise ValueError(
+                f"Target batch size {target.shape[0]} does not match output batch size "
+                f"{outputs.shape[0]}."
+            )
+        return outputs.gather(1, target).sum()
+
+    def _compute_layer_gradient_signal(
+        self,
+        input_tensor: torch.Tensor,
+        target: Union[torch.Tensor, int, None],
+        layer_name: str,
+        multiply_by_activation: bool = False,
+    ) -> Optional[torch.Tensor]:
         layer_module = self._get_layer_module(layer_name)
         if layer_module is None:
             self.logger.warning(f"Layer module not found for {layer_name}")
             return None
-        
-        # Create forward function for the model
-        def forward_func(x):
-            return self.model(x)
-        
+
+        captured = {}
+
+        def capture_activation(_module, _inputs, output):
+            captured["activation"] = output[0] if isinstance(output, tuple) else output
+
+        handle = layer_module.register_forward_hook(capture_activation)
+        was_training = self.model.training
+
         try:
-            # ============ LAYER-SPECIFIC METHODS ============
-            if method == AttributionMethod.LAYER_CONDUCTANCE.value:
-                attributor = LayerConductance(forward_func, layer_module)
-            elif method == AttributionMethod.LAYER_GRADIENT_X_ACTIVATION.value:
-                attributor = LayerGradientXActivation(forward_func, layer_module)
-            elif method == AttributionMethod.LAYER_INTEGRATED_GRADIENTS.value:
-                attributor = LayerIntegratedGradients(forward_func, layer_module)
-            elif method == AttributionMethod.DEEP_LIFT.value:
-                # DeepLift needs the actual model (nn.Module), not just forward function
-                attributor = LayerDeepLift(self.model, layer_module)
-            elif method == AttributionMethod.LAYER_ACTIVATION.value:
-                # NOTE: LayerActivation returns raw activations, not attributions
-                # Use this for baseline comparison - activations alone don't measure importance
-                attributor = LayerActivation(forward_func, layer_module)
-            elif method == AttributionMethod.LAYER_LRP.value:
-                # Layer-wise Relevance Propagation for specific layers
-                # NOTE: LRP requires model without in-place operations (e.g., ReLU(inplace=False))
-                # LRP needs the actual model (nn.Module)
-                attributor = LayerLRP(self.model, layer_module)
-            elif method == AttributionMethod.LAYER_GRADCAM.value:
-                # Grad-CAM: Works best with conv layers
-                attributor = LayerGradCam(forward_func, layer_module)
-            
-            # ============ INPUT-LEVEL METHODS ============
-            elif method == AttributionMethod.SALIENCY.value:
-                attributor = Saliency(forward_func)
-            elif method == AttributionMethod.INPUT_X_GRADIENT.value:
-                attributor = InputXGradient(forward_func)
-            elif method == AttributionMethod.INTEGRATED_GRADIENTS.value:
-                attributor = IntegratedGradients(forward_func)
-            elif method == AttributionMethod.GUIDED_BACKPROP.value:
-                # GuidedBackprop modifies ReLU backward hooks, which can conflict with
-                # quantization layers. We use a deep copy of the model to isolate the
-                # attribution computation from the training model.
-                import copy
-                model_copy = copy.deepcopy(self.model)
-                model_copy.eval()
-                attributor = GuidedBackprop(model_copy)
-                # Store the copy so it can be garbage collected properly
-                self._guided_backprop_model = model_copy
-            elif method == AttributionMethod.GRADIENT_SHAP.value:
-                # NOTE: GradientShap is slow - requires many baseline samples
-                attributor = GradientShap(forward_func)
-            
-            # ============ DECOMPOSITION-BASED METHODS ============
-            elif method == AttributionMethod.LRP.value:
-                # Layer-wise Relevance Propagation (full model)
-                # NOTE: Requires model without in-place operations (ReLU inplace=False)
-                # LRP needs the actual model (nn.Module)
-                attributor = LRP(self.model)
-            elif method == AttributionMethod.DECONVOLUTION.value:
-                # Deconvolution needs the actual model (nn.Module)
-                attributor = Deconvolution(self.model)
-            
-            else:
-                # Default to layer conductance for unknown methods
-                self.logger.warning(f"Unknown method {method}, defaulting to layer_conductance")
-                attributor = LayerConductance(forward_func, layer_module)
-            
-            self._layer_attributors[cache_key] = attributor
-            return attributor
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to create attributor for {layer_name}: {e}")
+            self.model.eval()
+            self.model.zero_grad(set_to_none=True)
+            outputs = self._forward_model(input_tensor)
+            activation = captured.get("activation")
+            if activation is None:
+                raise RuntimeError(f"Failed to capture activation for layer '{layer_name}'")
+
+            score = self._extract_target_score(outputs, target)
+            gradients = torch.autograd.grad(
+                score,
+                activation,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=False,
+            )[0]
+
+            if multiply_by_activation:
+                return activation.detach() * gradients.detach()
+            return gradients.detach()
+        except Exception as exc:
+            self.logger.warning(f"Layer gradient attribution failed for {layer_name}: {exc}")
             return None
-    
+        finally:
+            handle.remove()
+            self.model.zero_grad(set_to_none=True)
+            self.model.train(was_training)
+
+    def _get_attributor(self, layer_name: str, method: str):
+        resolved_method = self._resolve_structured_method(method)
+        cache_key = f"{layer_name}_{resolved_method}"
+
+        if cache_key in self._layer_attributors:
+            return self._layer_attributors[cache_key]
+
+        layer_module = self._get_layer_module(layer_name)
+        if layer_module is None:
+            self.logger.warning(f"Layer module not found for {layer_name}")
+            return None
+
+        def forward_func(x):
+            return self._forward_model(x)
+
+        try:
+            if resolved_method == AttributionMethod.LAYER_CONDUCTANCE.value:
+                attributor = LayerConductance(forward_func, layer_module)
+            elif resolved_method == AttributionMethod.LAYER_GRADIENT_X_ACTIVATION.value:
+                attributor = LayerGradientXActivation(forward_func, layer_module)
+            elif resolved_method == AttributionMethod.LAYER_INTEGRATED_GRADIENTS.value:
+                attributor = LayerIntegratedGradients(forward_func, layer_module)
+            elif resolved_method == AttributionMethod.DEEP_LIFT.value:
+                attributor = LayerDeepLift(self.model, layer_module)
+            elif resolved_method == "layer_gradient_shap":
+                attributor = LayerGradientShap(forward_func, layer_module)
+            elif resolved_method == AttributionMethod.LAYER_LRP.value:
+                attributor = LayerLRP(self.model, layer_module)
+            else:
+                return None
+        except Exception as exc:
+            self.logger.warning(f"Failed to create attributor for {layer_name}: {exc}")
+            return None
+
+        self._layer_attributors[cache_key] = attributor
+        return attributor
+
     def compute_layer_attribution(
         self,
         input_tensor: torch.Tensor,
         target: Union[torch.Tensor, int],
         layer_name: str,
     ) -> Optional[torch.Tensor]:
-        """
-        Compute attribution scores for a specific layer.
-        
-        Args:
-            input_tensor: Model input (batch of samples)
-            target: Target labels or class index
-            layer_name: Name of the layer to compute attributions for
-            
-        Returns:
-            Attribution tensor or None if computation fails
-        """
+        resolved_method = self._resolve_structured_method(self.attribution_method)
+
+        if resolved_method == "layer_saliency":
+            return self._compute_layer_gradient_signal(
+                input_tensor=input_tensor,
+                target=target,
+                layer_name=layer_name,
+                multiply_by_activation=False,
+            )
+
         attributor = self._get_attributor(layer_name, self.attribution_method)
         if attributor is None:
             return None
-        
+
+        if isinstance(target, torch.Tensor) and target.dim() > 0 and target.numel() == 1:
+            target = target.item()
+
         baseline = self._create_baseline(input_tensor)
-        
-        # Convert target to appropriate format
-        if isinstance(target, torch.Tensor):
-            if target.dim() > 0:
-                target = target[0].item() if target.numel() == 1 else target
-        
+        was_training = self.model.training
+
         try:
-            self.model.eval()  # Ensure model is in eval mode for attribution
-            
-            # ============ METHODS REQUIRING BASELINE + STEPS ============
-            if self.attribution_method in [
+            self.model.eval()
+            self.model.zero_grad(set_to_none=True)
+
+            if resolved_method in [
                 AttributionMethod.LAYER_CONDUCTANCE.value,
                 AttributionMethod.LAYER_INTEGRATED_GRADIENTS.value,
             ]:
@@ -321,190 +329,113 @@ class CaptumAttributionCalculator:
                     target=target,
                     n_steps=self.n_steps,
                 )
-            
-            # ============ METHODS REQUIRING BASELINE (NO STEPS) ============
-            elif self.attribution_method in [
-                AttributionMethod.DEEP_LIFT.value,
-                AttributionMethod.INTEGRATED_GRADIENTS.value,
-            ]:
+            elif resolved_method == AttributionMethod.DEEP_LIFT.value:
                 attributions = attributor.attribute(
                     input_tensor,
                     baselines=baseline,
                     target=target,
                 )
-            
-            # ============ GRADIENT-BASED METHODS (NO BASELINE) ============
-            elif self.attribution_method in [
-                AttributionMethod.SALIENCY.value,
-                AttributionMethod.INPUT_X_GRADIENT.value,
-                AttributionMethod.GUIDED_BACKPROP.value,
-                AttributionMethod.DECONVOLUTION.value,
-            ]:
+            elif resolved_method == AttributionMethod.LAYER_GRADIENT_X_ACTIVATION.value:
                 attributions = attributor.attribute(input_tensor, target=target)
-            
-            # ============ LAYER-SPECIFIC METHODS ============
-            elif self.attribution_method == AttributionMethod.LAYER_GRADIENT_X_ACTIVATION.value:
-                attributions = attributor.attribute(
-                    input_tensor,
-                    target=target,
+            elif resolved_method == "layer_gradient_shap":
+                baselines = torch.cat(
+                    [self._create_baseline(input_tensor) for _ in range(4)],
+                    dim=0,
                 )
-            elif self.attribution_method == AttributionMethod.LAYER_ACTIVATION.value:
-                # LayerActivation doesn't need target - just returns activations
-                attributions = attributor.attribute(input_tensor)
-            elif self.attribution_method == AttributionMethod.LAYER_LRP.value:
-                # LayerLRP needs target for relevance propagation
-                attributions = attributor.attribute(input_tensor, target=target)
-            elif self.attribution_method == AttributionMethod.LAYER_GRADCAM.value:
-                # Grad-CAM needs target
-                attributions = attributor.attribute(input_tensor, target=target)
-            
-            # ============ LRP (FULL MODEL) ============
-            elif self.attribution_method == AttributionMethod.LRP.value:
-                attributions = attributor.attribute(input_tensor, target=target)
-            
-            # ============ GRADIENT SHAP (SLOW - MULTIPLE BASELINES) ============
-            elif self.attribution_method == AttributionMethod.GRADIENT_SHAP.value:
-                # GradientShap requires multiple baselines for sampling
-                # Create a small batch of baselines
-                baselines = torch.cat([
-                    self._create_baseline(input_tensor) for _ in range(5)
-                ], dim=0)
                 attributions = attributor.attribute(
                     input_tensor,
                     baselines=baselines,
                     target=target,
-                    n_samples=20,  # Number of samples for SHAP
+                    n_samples=8,
                 )
-            
+            elif resolved_method == AttributionMethod.LAYER_LRP.value:
+                attributions = attributor.attribute(input_tensor, target=target)
             else:
-                # Default: methods without baseline
-                attributions = attributor.attribute(
-                    input_tensor,
-                    target=target,
+                raise ValueError(
+                    f"Resolved attribution method '{resolved_method}' is not implemented."
                 )
-            
-            self.model.train()  # Return to training mode
+
             return attributions
-            
-        except Exception as e:
-            self.logger.warning(f"Attribution failed for {layer_name}: {e}")
-            self.model.train()
+        except Exception as exc:
+            self.logger.warning(f"Attribution failed for {layer_name}: {exc}")
             return None
-    
+        finally:
+            self.model.zero_grad(set_to_none=True)
+            self.model.train(was_training)
+
     def compute_all_layer_attributions(
         self,
         input_tensor: torch.Tensor,
         target: Union[torch.Tensor, int],
         layer_names: Optional[List[str]] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Compute attribution scores for all (or specified) layers.
-        
-        Args:
-            input_tensor: Model input (batch of samples)
-            target: Target labels
-            layer_names: List of layer names to compute. If None, compute for all layers.
-            
-        Returns:
-            Dictionary mapping layer names to attribution tensors
-        """
         if layer_names is None:
-            # Get all layers with parameters
-            layer_names = list(set(self._param_to_layer.values()))
-        
+            layer_names = [
+                name
+                for name, module in self._layer_to_module.items()
+                if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Linear))
+            ]
+
         attributions = {}
         for layer_name in layer_names:
             attr = self.compute_layer_attribution(input_tensor, target, layer_name)
             if attr is not None:
                 attributions[layer_name] = attr
-        
         return attributions
-    
+
     def aggregate_attribution_to_groups(
         self,
         attribution: torch.Tensor,
         num_groups: int,
         aggregation: str = "sum_abs",
     ) -> torch.Tensor:
-        """
-        Aggregate layer attribution to per-group importance scores.
-        
-        For structured pruning, we need to aggregate attributions along the
-        channel/group dimension.
-        
-        Args:
-            attribution: Attribution tensor from Captum
-            num_groups: Number of pruning groups
-            aggregation: Aggregation method ("sum_abs", "mean_abs", "max_abs")
-            
-        Returns:
-            Per-group importance scores tensor of shape [num_groups]
-        """
-        # Attribution shape depends on the layer type
-        # For Conv2d: [batch, channels, height, width]
-        # For Linear: [batch, features]
-        
         if attribution.dim() == 4:
-            # Convolutional layer: aggregate over spatial dimensions and batch
             if aggregation == "sum_abs":
-                channel_attr = torch.abs(attribution).sum(dim=(0, 2, 3))  # [channels]
+                channel_attr = torch.abs(attribution).sum(dim=(0, 2, 3))
             elif aggregation == "mean_abs":
                 channel_attr = torch.abs(attribution).mean(dim=(0, 2, 3))
-            else:  # max_abs
+            else:
                 channel_attr = torch.abs(attribution).amax(dim=(0, 2, 3))
-        elif attribution.dim() == 2:
-            # Linear layer: aggregate over batch
+        elif attribution.dim() == 3:
             if aggregation == "sum_abs":
-                channel_attr = torch.abs(attribution).sum(dim=0)  # [features]
+                channel_attr = torch.abs(attribution).sum(dim=(1, 2))
+            elif aggregation == "mean_abs":
+                channel_attr = torch.abs(attribution).mean(dim=(1, 2))
+            else:
+                channel_attr = torch.abs(attribution).amax(dim=(1, 2))
+        elif attribution.dim() == 2:
+            if aggregation == "sum_abs":
+                channel_attr = torch.abs(attribution).sum(dim=0)
             elif aggregation == "mean_abs":
                 channel_attr = torch.abs(attribution).mean(dim=0)
             else:
                 channel_attr = torch.abs(attribution).amax(dim=0)
-        elif attribution.dim() == 3:
-            # Could be sequence data or other format
-            if aggregation == "sum_abs":
-                channel_attr = torch.abs(attribution).sum(dim=(0, 2))
-            elif aggregation == "mean_abs":
-                channel_attr = torch.abs(attribution).mean(dim=(0, 2))
-            else:
-                channel_attr = torch.abs(attribution).amax(dim=(0, 2))
+        elif attribution.dim() == 1:
+            channel_attr = torch.abs(attribution)
         else:
-            # Flatten and handle
             channel_attr = torch.abs(attribution).flatten()
-        
-        # Reshape to match num_groups if needed
+
         if channel_attr.numel() != num_groups:
             if channel_attr.numel() > num_groups:
-                # Reshape and sum within groups
                 group_size = channel_attr.numel() // num_groups
                 if group_size * num_groups == channel_attr.numel():
-                    channel_attr = channel_attr[:num_groups * group_size]
+                    channel_attr = channel_attr[: num_groups * group_size]
                     channel_attr = channel_attr.view(num_groups, group_size).sum(dim=1)
                 else:
-                    # Truncate or interpolate
                     channel_attr = channel_attr[:num_groups]
             else:
-                # Pad with zeros
                 padded = torch.zeros(num_groups, device=channel_attr.device)
-                padded[:channel_attr.numel()] = channel_attr
+                padded[: channel_attr.numel()] = channel_attr
                 channel_attr = padded
-        
+
         return channel_attr
-    
+
     def update_attribution_cache(
         self,
         layer_name: str,
         new_attribution: torch.Tensor,
         ema_decay: float = 0.9,
     ):
-        """
-        Update the attribution cache with EMA blending.
-        
-        Args:
-            layer_name: Name of the layer
-            new_attribution: New attribution scores
-            ema_decay: Exponential moving average decay factor
-        """
         if layer_name in self._attribution_cache:
             old_attr = self._attribution_cache[layer_name]
             self._attribution_cache[layer_name] = (
@@ -512,12 +443,10 @@ class CaptumAttributionCalculator:
             )
         else:
             self._attribution_cache[layer_name] = new_attribution.detach().clone()
-    
+
     def get_cached_attribution(self, layer_name: str) -> Optional[torch.Tensor]:
-        """Get cached attribution for a layer."""
         return self._attribution_cache.get(layer_name)
-    
+
     def clear_cache(self):
-        """Clear the attribution cache."""
         self._attribution_cache.clear()
         self._layer_attributors.clear()

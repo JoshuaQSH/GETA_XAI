@@ -44,9 +44,16 @@ def parse_args():
         type=str,
         default=ATTRMETHOD,
         choices=[
-            'saliency', 'input_x_gradient', 'guided_backprop', 'deconvolution',
-            'layer_conductance', 'layer_gradient_x_activation', 'layer_integrated_gradients',
-            'deep_lift', 'integrated_gradients', 'lrp', 'layer_lrp', 'gradient_shap'
+            'saliency',
+            'input_x_gradient',
+            'layer_conductance',
+            'layer_gradient_x_activation',
+            'layer_integrated_gradients',
+            'deep_lift',
+            'integrated_gradients',
+            'lrp',
+            'layer_lrp',
+            'gradient_shap',
         ],
         help='Captum attribution method to use for importance scoring'
     )

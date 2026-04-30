@@ -7,9 +7,9 @@ Test ALL Captum attribution methods through all 4 stages:
 3. Joint Pruning & Quantization Stage
 4. Fine-tuning Stage
 
-Tests ALL methods: saliency, integrated_gradients, deep_lift, guided_backprop,
-                   input_x_gradient, layer_conductance, layer_gradient_x_activation,
-                   layer_integrated_gradients, lrp, layer_lrp, deconvolution, gradient_shap
+Tests all structured-pruning-capable methods: saliency, integrated_gradients,
+deep_lift, input_x_gradient, layer_conductance, layer_gradient_x_activation,
+layer_integrated_gradients, lrp, layer_lrp, gradient_shap
 Uses larger synthetic dataset (1000+ samples)
 
 NOTE: Some methods have specific requirements:
@@ -35,59 +35,49 @@ from only_train_once import OTO
 from only_train_once.quantization.quant_model import model_to_quantize_model
 from only_train_once.quantization.quant_layers import QuantizationMode
 
-# Import incompatible methods list from captum_attribution
 try:
-    from only_train_once.xai_optimizer.captum_attribution import QUANTIZATION_INCOMPATIBLE_METHODS
+    from only_train_once.xai_optimizer.captum_attribution import (
+        QUANTIZATION_INCOMPATIBLE_METHODS,
+        SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS,
+    )
 except ImportError:
-    QUANTIZATION_INCOMPATIBLE_METHODS = ['guided_backprop']
+    QUANTIZATION_INCOMPATIBLE_METHODS = ['guided_backprop', 'deconvolution']
+    SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS = [
+        'saliency',
+        'input_x_gradient',
+        'layer_conductance',
+        'layer_gradient_x_activation',
+        'layer_integrated_gradients',
+        'deep_lift',
+        'integrated_gradients',
+        'lrp',
+        'layer_lrp',
+        'gradient_shap',
+    ]
 
 
 # Attribution methods to test (ordered by speed: fast to slow)
 # Categories:
-# 1. GRADIENT-BASED (fast): saliency, input_x_gradient, guided_backprop, deconvolution
+# 1. GRADIENT-BASED (fast): saliency, input_x_gradient
 # 2. LAYER-SPECIFIC: layer_conductance, layer_gradient_x_activation, layer_integrated_gradients
 # 3. PATH-BASED (slower): deep_lift, integrated_gradients
 # 4. DECOMPOSITION: lrp, layer_lrp (require inplace=False)
 # 5. SHAP-BASED (very slow): gradient_shap
 
 ATTRIBUTION_METHODS = [
-    # === FAST GRADIENT-BASED METHODS ===
-    'saliency',           # Fast: single gradient pass (gradient magnitude)
-    'input_x_gradient',   # Fast: input * gradient (simple sensitivity)
-    'guided_backprop',    # Fast: modified backprop (positive gradients only)
-    'deconvolution',      # Fast: deconvolution-based visualization
-    
-    # === LAYER-SPECIFIC METHODS ===
-    'layer_conductance',           # Medium: how much a layer affects output
-    'layer_gradient_x_activation', # Medium: gradient * activation at layer
-    'layer_integrated_gradients',  # Slow: integrated gradients at layer level
-    
-    # === PATH-BASED METHODS ===
-    'deep_lift',          # Medium: difference from reference propagation
-    'integrated_gradients',  # Slow: path integral from baseline to input
-    
-    # === DECOMPOSITION-BASED METHODS ===
-    # NOTE: LRP requires model WITHOUT inplace operations (ReLU(inplace=False))
-    # We'll test with a modified model
-    # 'lrp',              # Requires inplace=False - tested separately
-    # 'layer_lrp',        # Requires inplace=False - tested separately
-    
-    # === SHAP-BASED METHODS (VERY SLOW) ===
-    # 'gradient_shap',    # Very slow: skipped by default (many samples needed)
+    method
+    for method in SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS
+    if method not in {'lrp', 'layer_lrp', 'gradient_shap'}
 ]
 
-# Methods that require special model configuration (no inplace operations)
 LRP_METHODS = ['lrp', 'layer_lrp']
 
-# Methods that are very slow and skipped by default
 SLOW_METHODS = ['gradient_shap']
 
 # Timeouts for slow methods (seconds per epoch)
 METHOD_TIMEOUTS = {
     'saliency': 30,
     'input_x_gradient': 30,
-    'guided_backprop': 45,
-    'deconvolution': 45,
     'layer_conductance': 60,
     'layer_gradient_x_activation': 45,
     'layer_integrated_gradients': 120,
@@ -149,7 +139,7 @@ class SmallVGG(nn.Module):
         return x
 
 
-def test_attribution_method(method_name, device, num_samples=500):
+def run_attribution_method_check(method_name, device, num_samples=500):
     """
     Test a single attribution method through all 4 stages.
     
@@ -420,7 +410,7 @@ def run_all_tests(include_lrp=True, include_slow=False):
             else:
                 samples = 500  # Standard sample count
                 
-            success, errors, skipped = test_attribution_method(method, device, num_samples=samples)
+            success, errors, skipped = run_attribution_method_check(method, device, num_samples=samples)
             results[method] = {'success': success, 'errors': errors, 'skipped': skipped}
         except Exception as e:
             print(f"✗ {method} failed with exception: {e}")
@@ -440,7 +430,7 @@ def run_all_tests(include_lrp=True, include_slow=False):
     
     # Group results by category
     categories = {
-        'Gradient-Based (Fast)': ['saliency', 'input_x_gradient', 'guided_backprop', 'deconvolution'],
+        'Gradient-Based (Fast)': ['saliency', 'input_x_gradient'],
         'Layer-Specific': ['layer_conductance', 'layer_gradient_x_activation', 'layer_integrated_gradients'],
         'Path-Based': ['deep_lift', 'integrated_gradients'],
         'Decomposition (LRP)': ['lrp', 'layer_lrp'],

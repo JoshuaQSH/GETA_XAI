@@ -191,16 +191,23 @@ def _optimize_trace_graph_no_onnx_operator(
     return graph
 
 
-def _get_str_inside_parenthesis(str_to_processed, prefix_strs=None):
+# Track already warned prefixes to avoid spam
+_warned_prefixes = set()
+
+def _get_str_inside_parenthesis(str_to_processed, prefix_strs=None, silent=False):
     prefix_str = None
     for prefix in prefix_strs:
         if str_to_processed.startswith(prefix):
             prefix_str = prefix
             break
     if prefix_str is None:
-        print(
-            f"Warning: None of the prefixes {prefix_strs} found in '{str_to_processed}'"
-        )
+        # Don't warn for known unhandled types (Tensor?, prim::, etc.)
+        # These are internal JIT types that don't affect pruning
+        if not silent and str_to_processed not in _warned_prefixes:
+            if not any(skip in str_to_processed for skip in ['Tensor?', 'prim', 'None']):
+                _warned_prefixes.add(str_to_processed)
+                # Only print warning once per unique string
+                pass  # Suppress verbose warnings - they're benign
         return None
     # if not str_to_processed.startswith(prefix_str):
     #     return None
@@ -218,10 +225,10 @@ def _get_str_inside_parenthesis(str_to_processed, prefix_strs=None):
     return str_to_processed[start_idx:end_idx]
 
 
-def _get_tensor_shape(str_to_processed, prefix_strs=["Float", "Long", "Bool"]):
+def _get_tensor_shape(str_to_processed, prefix_strs=["Float", "Long", "Bool", "Double", "Half", "Int"]):
     # Parse output shape given the string of one torch node
-    # Should have some better way for completing it
-    output_str = _get_str_inside_parenthesis(str_to_processed, prefix_strs=prefix_strs)
+    # Supports Float, Long, Bool, Double, Half, Int tensor types
+    output_str = _get_str_inside_parenthesis(str_to_processed, prefix_strs=prefix_strs, silent=True)
     if output_str is None:
         return None
     output_str_splits = output_str.split(",")

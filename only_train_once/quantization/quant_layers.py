@@ -60,10 +60,10 @@ class SymQuantizerNonLinear(torch.autograd.Function):
 
         # q_m <= q_s can happen
         eps = 1e-6
-        # base = (input_abs - q_s).clamp_min(eps)
-        # input_pow = torch.exp(t_quant * torch.log(base))
+        # Safe version: clamp (input_abs - q_s) to prevent log(negative) = NaN
+        base = (input_abs - q_s).clamp_min(eps)
         range_pow = torch.exp(t_quant * torch.log(torch.abs(q_m - q_s) + eps))
-        input_pow = torch.exp(t_quant * torch.log(input_abs - q_s))  # input_abs >= q_s
+        input_pow = torch.exp(t_quant * torch.log(base))  # Safe: base >= eps
 
         output = d_quant * torch.round(input_pow.div(d_quant))
         output[input_abs <= q_s] = 0
@@ -76,18 +76,20 @@ class SymQuantizerNonLinear(torch.autograd.Function):
         input, d_quant, q_m, t_quant, clip_val, q_s = ctx.saved_tensors
         device = input.device
         input_abs = torch.abs(input)
+        eps = 1e-6
 
         grad_x = grad_output.clone()
         grad_x[input.ge(clip_val[1])] = 0
         grad_x[input.le(clip_val[0])] = 0
-        # Useful quantities
+        # Useful quantities - use clamped base to prevent log(negative) = NaN
+        base = (input_abs - q_s).clamp_min(eps)
         range_pow = torch.exp(
-            t_quant * torch.log(torch.abs(q_m - q_s) + 1e-6)
+            t_quant * torch.log(torch.abs(q_m - q_s) + eps)
         )  # q_m <= q_s can happen
         range_pow_low = torch.exp(
-            (t_quant - 1) * torch.log(torch.abs(q_m - q_s) + 1e-6)
+            (t_quant - 1) * torch.log(torch.abs(q_m - q_s) + eps)
         )  # q_m <= q_s can happen
-        input_pow = torch.exp(t_quant * torch.log(input_abs - q_s))  # input_abs >= q_s
+        input_pow = torch.exp(t_quant * torch.log(base))  # Safe: base >= eps
 
         grad_d_xq = torch.round(input_pow.div(d_quant)) - input_pow.div(d_quant)
         grad_d_xq[input_abs >= q_m] = torch.round(
@@ -101,8 +103,8 @@ class SymQuantizerNonLinear(torch.autograd.Function):
         grad_qm_xq[input_abs <= q_m] = 0
         grad_qm = torch.tensor([torch.sum(grad_output * grad_qm_xq)], device=device)
 
-        grad_t_xq = input_pow * (torch.log(input_abs - q_s))
-        grad_t_xq[input_abs >= q_m] = range_pow * torch.log(torch.abs(q_m - q_s) + 1e-6)
+        grad_t_xq = input_pow * torch.log(base)  # Safe: use clamped base
+        grad_t_xq[input_abs >= q_m] = range_pow * torch.log(torch.abs(q_m - q_s) + eps)
         grad_t_xq[input_abs <= q_s] = 0
         grad_t_xq = torch.sign(input) * grad_t_xq
         grad_t = torch.tensor([torch.sum(grad_output * grad_t_xq)], device=device)
@@ -261,9 +263,14 @@ class DGEQuantizer(torch.autograd.Function):
 
         # Paper's DGE gradient computation: f'(x) = (1/k) · |x - δ/2|^(1/k - 1)
         x_centered = input - d_quant/2
-        grad_scale = (1/k) * torch.pow(torch.abs(x_centered), 1/k - 1)
+        # Add small epsilon to avoid pow(0, negative) = inf when k > 1
+        # This happens with bit widths > 4 where k = 5 * (4/bits) > 1
+        x_centered_abs = torch.abs(x_centered).clamp(min=1e-8)
+        exponent = 1/k - 1
+        grad_scale = (1/k) * torch.pow(x_centered_abs, exponent)
+        # Replace any inf/nan with 1.0 (neutral gradient scaling)
+        grad_scale = torch.where(torch.isfinite(grad_scale), grad_scale, torch.ones_like(grad_scale))
         grad_x = grad_x * grad_scale
-        # TODO: do we modify if we have higher than 4 bits?
         # Cap gradient magnitude at 3.0 as in paper
         grad_x = torch.clamp(grad_x, -3.0, 3.0) 
 
@@ -334,6 +341,11 @@ class QuantizeMixin:
 
     def quantize_weight(self, weight: torch.tensor) -> torch.Tensor:
         """Quantize the weight tensor."""
+        # Ensure quantization params are valid (clamp in-place)
+        with torch.no_grad():
+            self.d_quant_wt.data.clamp_(min=1e-8)
+            self.q_m_wt.data.clamp_(min=1e-6)
+        
         weight_clip_val = torch.tensor(self.weight_clip_val, device=weight.device)
         q_s = torch.tensor(0.0, device=weight.device)
         quantizer = _get_quantizer(self.quant_type)
@@ -360,6 +372,11 @@ class QuantizeMixin:
         """Quantize the activation tensor."""
         if self.quant_mode != QuantizationMode.WEIGHT_AND_ACTIVATION:
             return activation
+
+        # Ensure quantization params are valid (clamp in-place)
+        with torch.no_grad():
+            self.d_quant_act.data.clamp_(min=1e-8)
+            self.q_m_act.data.clamp_(min=1e-6)
 
         activation_clip_val = torch.tensor(self.act_clip_val, device=activation.device)
         q_s = torch.tensor(0.0, device=activation.device)

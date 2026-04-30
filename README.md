@@ -68,6 +68,7 @@ Check out [uv](https://docs.astral.sh/uv/getting-started/installation/) for more
 ```bash
 # Try the vgg7 with CIFAR10 
 python qvgg7_xaigeta_demo.py
+# python qvgg7_xaigeta_demo.py --method <ATTRIBUTION_METHOD> --weight 0.3 --epochs 50 --device "cuda:0" > "./logs/vgg7_demo.log" 2>&1
 
 # To compare with the GETA 
 python qvgg7_geta_demo.py
@@ -85,7 +86,7 @@ Options:
   -e, --epochs EPOCHS     Number of epochs (default: 50)
   -d, --device DEVICE     Device to use (default: cuda:0)
   -a, --all               Run all methods with all default weights
-  -f, --fast              Run only fast methods (saliency, input_x_gradient, deconvolution)
+  -f, --fast              Run only fast methods (saliency, input_x_gradient)
   -l, --list              List all available attribution methods
   -h, --help              Show this help message
 
@@ -97,8 +98,6 @@ Examples:
 Available methods:
   - saliency
   - input_x_gradient
-  - guided_backprop
-  - deconvolution
   - layer_conductance
   - layer_gradient_x_activation
   - layer_integrated_gradients
@@ -106,7 +105,42 @@ Available methods:
   - integrated_gradients
   - lrp
   - layer_lrp
+  - gradient_shap
 ```
+
+### Running on Viking with Slurm
+
+The repository includes reusable Slurm jobs in `./viking_running_jobs/` for the remote Viking workflow:
+
+- `run_demo.job`: small sanity/demo jobs (`quickcheck`, `multimethod`, `pytest`, or `vgg7-demo`)
+- `run_cases.job`: single experiment launcher for VGG7, ResNet20, ResNet50, and BERT GETA/XAI-GETA runs
+- `run_vgg7_compare.job`: first VGG comparison pack (GETA baseline + selected XAI-GETA runs)
+- `run_vgg7_sweep.job`: Slurm array sweep for VGG7 XAI methods and weights
+- `run_resnet50_dist.job`: distributed ResNet50 ImageNet XAI-GETA launcher with `torchrun`
+
+Expected workflow:
+
+```bash
+git clone <repo>
+cd GETA_XAI
+
+# sanity/demo
+sbatch viking_running_jobs/run_demo.job
+
+# single full experiment
+sbatch --export=ALL,CASE=vgg7-xai,METHOD=saliency,WEIGHT=0.3,SPARSITY=0.7,EPOCHS=200 \
+  viking_running_jobs/run_cases.job
+
+# first VGG comparison pack
+sbatch viking_running_jobs/run_vgg7_compare.job
+
+# array sweep
+sbatch viking_running_jobs/run_vgg7_sweep.job
+```
+
+Remote job logs and copied-back results should live in `log_viking/`, while local workstation logs stay in `logs/`. Generated Viking outputs under `log_viking/slurm/`, `log_viking/results/`, `log_viking/trash/`, and `log_viking/*.log` are git-ignored so the repo stays clean after remote runs.
+
+The Slurm job scripts avoid machine-specific repo paths. If Viking needs a different dataset root, adjust the relevant files under `run_cases/configs/` before submission.
 
 ## Reprducing experiments
 
@@ -115,20 +149,22 @@ Available methods:
 
 ```bash
 # Use YAML config only
-python ./run_cases/vgg7_cifar10_geta.py --config ./run_cases/configs/default_geta.yaml
+python ./run_cases/vgg7_cifar10_geta.py --config ./run_cases/configs/default_geta.yaml --sparsity 0.6 --device "cuda:1" > vgg7_geta_e200_s0.6.log 2>&1
 
 # YAML config with CLI overrides (CLI takes priority)
 # CLI arguments > YAML config > ExperimentConfig defaults
-python ./run_cases/vgg7_cifar10_xaigeta.py --config ./run_cases/configs/default_xai_geta.yaml --epochs 50 --method deep_lift
+python ./run_cases/vgg7_cifar10_xaigeta.py --config ./run_cases/configs/default_xai_geta.yaml --sparsity 0.6 --device "cuda:0" > vgg7_xaigeta_e200_s0.6.log 2>&1
 
 # Original CLI-only mode still works
 python ./run_cases/vgg7_cifar10_geta.py --epochs 200 --sparsity 0.7
-
 
 # Running lists [TESTED]
 python ./run_cases/resnet20_cifar10_geta.py --config ./run_cases/configs/resnet20_cifar10_geta.yaml --epochs 2
 python ./run_cases/resnet50_imagenet_geta.py --config ./run_cases/configs/resnet50_imagenet_geta.yaml --epochs 2
 python ./run_cases/bert_squad_geta.py --config ./run_cases/configs/bert_squad_geta.yaml --epochs 2 --device cuda:0
+
+python run_cases/bert_squad_geta.py --config run_cases/configs/bert_squad_geta.yaml --epochs 5 --max-train-samples 5000 --max-eval-samples 1000
+python run_cases/bert_squad_xaigeta.py --config run_cases/configs/bert_squad_xaigeta.yaml --epochs 5 --max-train-samples 5000 --max-eval-samples 1000
 ```
 
 ## The XAI-GETA 

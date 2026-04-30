@@ -11,7 +11,7 @@ dataset:
 # Training Configuration
 training:
   epochs: 120
-  lr: 1.0e-3
+  lr: 1.0e-1
   lr_quant: 1.0e-3
   weight_decay: 1.0e-4
   lr_step_size: 30

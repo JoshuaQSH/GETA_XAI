@@ -84,10 +84,16 @@ class ExperimentConfig:
 
 # List of available attribution methods
 AVAILABLE_METHODS = [
-    'saliency', 'input_x_gradient', 'guided_backprop', 'deconvolution',
-    'layer_conductance', 'layer_gradient_x_activation', 
-    'layer_integrated_gradients', 'deep_lift', 'integrated_gradients',
-    'lrp', 'layer_lrp', 'gradient_shap'
+    'saliency',
+    'input_x_gradient',
+    'layer_conductance',
+    'layer_gradient_x_activation',
+    'layer_integrated_gradients',
+    'deep_lift',
+    'integrated_gradients',
+    'lrp',
+    'layer_lrp',
+    'gradient_shap',
 ]
 
 
@@ -273,7 +279,6 @@ def merge_config_with_args(config: ExperimentConfig, args: argparse.Namespace,
             config.baseline_type = args.baseline_type
         if hasattr(args, 'update_freq') and args.update_freq != 100:
             config.update_freq = args.update_freq
-    
     return config
 
 
@@ -334,6 +339,10 @@ def get_base_parser(description: str = 'GETA Experiment') -> argparse.ArgumentPa
                         help='Training batch size')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of data loading workers')
+    parser.add_argument('--max-train-samples', type=int, default=None,
+                        help='Maximum training samples (None for full dataset)')
+    parser.add_argument('--max-eval-samples', type=int, default=None,
+                        help='Maximum eval samples (None for full dataset)')
     
     # Training
     parser.add_argument('--epochs', '-e', type=int, default=200,
@@ -391,10 +400,16 @@ def get_xai_parser(description: str = 'XAI-GETA Experiment') -> argparse.Argumen
     # XAI-GETA specific
     parser.add_argument('--method', '-m', type=str, default='saliency',
                         choices=[
-                            'saliency', 'input_x_gradient', 'guided_backprop', 'deconvolution',
-                            'layer_conductance', 'layer_gradient_x_activation', 
-                            'layer_integrated_gradients', 'deep_lift', 'integrated_gradients',
-                            'lrp', 'layer_lrp', 'gradient_shap'
+                            'saliency',
+                            'input_x_gradient',
+                            'layer_conductance',
+                            'layer_gradient_x_activation',
+                            'layer_integrated_gradients',
+                            'deep_lift',
+                            'integrated_gradients',
+                            'lrp',
+                            'layer_lrp',
+                            'gradient_shap',
                         ],
                         help='Attribution method for importance scoring')
     parser.add_argument('--weight', '-w', type=float, default=0.3,

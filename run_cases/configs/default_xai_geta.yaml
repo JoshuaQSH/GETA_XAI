@@ -35,14 +35,14 @@ stages:
 
 # XAI-GETA Specific Configuration
 xai:
-  # Attribution method: saliency, input_x_gradient, guided_backprop, deconvolution,
-  #   layer_conductance, layer_gradient_x_activation, layer_integrated_gradients,
-  #   deep_lift, integrated_gradients, lrp, layer_lrp, gradient_shap
-  attribution_method: 'saliency'
-  attribution_weight: 0.5  # Weight for attribution in importance score (0.0-1.0)
-  attribution_freq: 200    # Frequency of attribution updates (steps)
+  # Attribution method: saliency, input_x_gradient, layer_conductance,
+  #   layer_gradient_x_activation, layer_integrated_gradients, deep_lift,
+  #   integrated_gradients, lrp, layer_lrp, gradient_shap
+  attribution_method: 'saliency'  # Recommended default for VGG runs
+  attribution_weight: 0.3  # Recommended first comparison setting
+  attribution_freq: 100    # Frequency of attribution updates (steps)
   attribution_n_steps: 5   # Number of steps for integrated gradients methods
-  ema_decay: 0.9999        # EMA decay for attribution smoothing (larger = smoother)
+  ema_decay: 0.9           # EMA decay for attribution smoothing
   num_samples: 10          # Number of samples for attribution computation
   baseline_type: 'mean'    # Baseline type: zero, random, mean
 

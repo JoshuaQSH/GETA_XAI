@@ -11,8 +11,6 @@ Usage:
 Available Attribution Methods:
     - saliency
     - input_x_gradient
-    - guided_backprop
-    - deconvolution
     - layer_conductance
     - layer_gradient_x_activation
     - layer_integrated_gradients
@@ -20,6 +18,7 @@ Available Attribution Methods:
     - integrated_gradients
     - lrp
     - layer_lrp
+    - gradient_shap
 
 Experimental Setup:
 - Bit width reduction: b_r = 2
@@ -219,7 +218,7 @@ def train_xai_geta(
             epoch_loss += loss.item()
             
             # XAI-GETA step (includes attribution-based importance)
-            optimizer.step()
+            optimizer.step(inputs=X, targets=y)
             
             pbar.set_postfix({'loss': loss.item()})
         

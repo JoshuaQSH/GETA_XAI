@@ -27,10 +27,8 @@ DEFAULT_DEVICE="cuda:0"
 
 # Attribution methods to test (all compatible methods)
 ALL_METHODS=(
-    # "saliency"
+    "saliency"
     "input_x_gradient"
-    "guided_backprop"
-    "deconvolution"
     "layer_conductance"
     "layer_gradient_x_activation"
     "layer_integrated_gradients"
@@ -38,13 +36,13 @@ ALL_METHODS=(
     "integrated_gradients"
     "lrp"
     "layer_lrp"
+    "gradient_shap"
 )
 
 # Fast methods (for quick testing)
 FAST_METHODS=(
     "saliency"
     "input_x_gradient"
-    "deconvolution"
 )
 
 # Default weights to test
@@ -69,7 +67,7 @@ usage() {
     echo "  -e, --epochs EPOCHS     Number of epochs (default: $DEFAULT_EPOCHS)"
     echo "  -d, --device DEVICE     Device to use (default: $DEFAULT_DEVICE)"
     echo "  -a, --all               Run all methods with all default weights"
-    echo "  -f, --fast              Run only fast methods (saliency, input_x_gradient, deconvolution)"
+    echo "  -f, --fast              Run only fast methods (saliency, input_x_gradient)"
     echo "  -l, --list              List all available attribution methods"
     echo "  -h, --help              Show this help message"
     echo ""
@@ -91,8 +89,6 @@ list_methods() {
     echo "Gradient-Based (Fast):"
     echo "  - saliency"
     echo "  - input_x_gradient"
-    echo "  - guided_backprop"
-    echo "  - deconvolution"
     echo ""
     echo "Layer-Specific:"
     echo "  - layer_conductance"
@@ -106,6 +102,9 @@ list_methods() {
     echo "Decomposition (LRP):"
     echo "  - lrp"
     echo "  - layer_lrp"
+    echo ""
+    echo "SHAP-Based:"
+    echo "  - gradient_shap"
 }
 
 # Run a single experiment

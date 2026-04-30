@@ -57,85 +57,175 @@ from run_cases.utils import (
 
 
 class SquadDataset(Dataset):
-    """Simple SQuAD dataset for demonstration."""
+    """
+    Full SQuAD v2.0 dataset for Question Answering.
+    
+    Properly handles:
+    - Tokenization with question-context pairs
+    - Answer span computation (start/end token positions)
+    - Unanswerable questions (SQuAD 2.0)
+    - Long context truncation with stride
+    """
 
-    def __init__(self, tokenizer, file_path, max_samples=1000):
+    def __init__(self, tokenizer, file_path, max_length=384, doc_stride=128, max_samples=None):
+        """
+        Args:
+            tokenizer: HuggingFace tokenizer
+            file_path: Path to SQuAD JSON file
+            max_length: Maximum sequence length
+            doc_stride: Stride for splitting long documents
+            max_samples: Optional limit on number of samples (None for full dataset)
+        """
         self.tokenizer = tokenizer
-        self.samples = []
-
+        self.max_length = max_length
+        self.doc_stride = doc_stride
+        self.features = []
+        
+        print(f"Loading SQuAD dataset from {file_path}...")
+        
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-
+        
+        # Process all QA pairs
         count = 0
-        for article in data['data']:
+        for article in tqdm(data['data'], desc="Processing articles"):
             for paragraph in article['paragraphs']:
                 context = paragraph['context']
+                
                 for qa in paragraph['qas']:
                     question = qa['question']
-                    # For simplicity, use the first answer if available
-                    if qa['answers']:
-                        answer = qa['answers'][0]['text']
-                        answer_start = qa['answers'][0]['answer_start']
+                    qa_id = qa['id']
+                    is_impossible = qa.get('is_impossible', False)
+                    
+                    # Get answer info
+                    if is_impossible or not qa['answers']:
+                        # Unanswerable question
+                        answer_text = ""
+                        answer_start_char = 0
                     else:
-                        # For SQuAD 2.0, some questions have no answer
-                        answer = ""
-                        answer_start = 0
-
-                    self.samples.append({
-                        'context': context,
-                        'question': question,
-                        'answer': answer,
-                        'answer_start': answer_start
-                    })
-
-                    count += 1
-                    if count >= max_samples:
+                        answer = qa['answers'][0]
+                        answer_text = answer['text']
+                        answer_start_char = answer['answer_start']
+                    
+                    # Tokenize question and context
+                    tokenized = self.tokenizer(
+                        question,
+                        context,
+                        max_length=max_length,
+                        truncation='only_second',  # Only truncate context
+                        stride=doc_stride,
+                        return_overflowing_tokens=True,
+                        return_offsets_mapping=True,
+                        padding='max_length',
+                        return_tensors='pt'
+                    )
+                    
+                    # Process each chunk (for long contexts)
+                    sample_mapping = tokenized.pop('overflow_to_sample_mapping', None)
+                    offset_mapping = tokenized.pop('offset_mapping')
+                    
+                    num_chunks = tokenized['input_ids'].shape[0]
+                    
+                    for chunk_idx in range(num_chunks):
+                        input_ids = tokenized['input_ids'][chunk_idx]
+                        attention_mask = tokenized['attention_mask'][chunk_idx]
+                        token_type_ids = tokenized['token_type_ids'][chunk_idx]
+                        offsets = offset_mapping[chunk_idx]
+                        
+                        # Find answer span in tokens
+                        start_position = 0
+                        end_position = 0
+                        
+                        if not is_impossible and answer_text:
+                            answer_end_char = answer_start_char + len(answer_text)
+                            
+                            # Find sequence IDs (0 for question, 1 for context, None for special tokens)
+                            sequence_ids = tokenized.sequence_ids(chunk_idx)
+                            
+                            # Find context start and end in tokens
+                            context_start = None
+                            context_end = None
+                            for idx, seq_id in enumerate(sequence_ids):
+                                if seq_id == 1:
+                                    if context_start is None:
+                                        context_start = idx
+                                    context_end = idx
+                            
+                            if context_start is not None and context_end is not None:
+                                # Check if answer is within this chunk
+                                chunk_start_char = offsets[context_start][0]
+                                chunk_end_char = offsets[context_end][1]
+                                
+                                if answer_start_char >= chunk_start_char and answer_end_char <= chunk_end_char:
+                                    # Find token positions
+                                    for idx in range(context_start, context_end + 1):
+                                        if offsets[idx][0] <= answer_start_char < offsets[idx][1]:
+                                            start_position = idx
+                                        if offsets[idx][0] < answer_end_char <= offsets[idx][1]:
+                                            end_position = idx
+                                            break
+                        
+                        self.features.append({
+                            'input_ids': input_ids,
+                            'attention_mask': attention_mask,
+                            'token_type_ids': token_type_ids,
+                            'start_positions': torch.tensor(start_position, dtype=torch.long),
+                            'end_positions': torch.tensor(end_position, dtype=torch.long),
+                            'qa_id': qa_id,
+                            'is_impossible': is_impossible
+                        })
+                        
+                        count += 1
+                        if max_samples is not None and count >= max_samples:
+                            break
+                    if max_samples is not None and count >= max_samples:
                         break
-                if count >= max_samples:
+                if max_samples is not None and count >= max_samples:
                     break
-            if count >= max_samples:
+            if max_samples is not None and count >= max_samples:
                 break
+        
+        print(f"Loaded {len(self.features)} features from {count} QA pairs")
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.features)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-
-        # Tokenize
-        inputs = self.tokenizer(
-            sample['question'],
-            sample['context'],
-            max_length=384,
-            truncation=True,
-            padding='max_length',
-            return_tensors='pt'
-        )
-
-        # For simplicity, we'll use dummy start/end positions
-        # In a real QA task, you'd compute these from the answer spans
+        feature = self.features[idx]
         return {
-            'input_ids': inputs['input_ids'].squeeze(),
-            'attention_mask': inputs['attention_mask'].squeeze(),
-            'token_type_ids': inputs['token_type_ids'].squeeze(),
-            'start_positions': torch.tensor(1, dtype=torch.long),  # Dummy start position
-            'end_positions': torch.tensor(2, dtype=torch.long)     # Dummy end position
+            'input_ids': feature['input_ids'],
+            'attention_mask': feature['attention_mask'],
+            'token_type_ids': feature['token_type_ids'],
+            'start_positions': feature['start_positions'],
+            'end_positions': feature['end_positions']
         }
 
 
-def get_squad_loaders(config: ExperimentConfig, tokenizer) -> tuple:
-    """Load SQuAD dataset and return train/test loaders."""
-
+def get_squad_loaders(config: ExperimentConfig, tokenizer, max_train_samples=None, max_eval_samples=None) -> tuple:
+    """
+    Load full SQuAD dataset and return train/test loaders.
+    
+    Args:
+        config: Experiment configuration
+        tokenizer: HuggingFace tokenizer
+        max_train_samples: Optional limit on training samples (None for full dataset)
+        max_eval_samples: Optional limit on eval samples (None for full dataset)
+    """
+    
     train_dataset = SquadDataset(
         tokenizer,
         os.path.join(config.dataset_root, 'SQuAD', 'train-v2.0.json'),
-        max_samples=1000  # Small subset for quick testing
+        max_length=384,
+        doc_stride=128,
+        max_samples=max_train_samples
     )
 
     test_dataset = SquadDataset(
         tokenizer,
         os.path.join(config.dataset_root, 'SQuAD', 'dev-v2.0.json'),
-        max_samples=200  # Small subset for quick testing
+        max_length=384,
+        doc_stride=128,
+        max_samples=max_eval_samples
     )
 
     trainloader = DataLoader(
@@ -183,17 +273,28 @@ def create_quantized_bert(device: str = 'cuda:0') -> tuple:
     return model.to(device), tuple(t.to(device) for t in dummy_input), tokenizer
 
 
-def evaluate_qa_model(model, testloader, device: str = 'cuda') -> float:
-    """Simple evaluation for QA model (dummy accuracy for demonstration)."""
+def evaluate_qa_model(model, testloader, device: str = 'cuda') -> tuple:
+    """
+    Evaluate QA model with proper metrics.
+    
+    Returns:
+        Tuple of (exact_match_score, f1_score, loss)
+    """
     model.eval()
-    correct = 0
-    total = 0
+    total_loss = 0.0
+    total_em = 0
+    total_f1 = 0.0
+    total_samples = 0
+    
+    loss_fn = nn.CrossEntropyLoss()
 
     with torch.no_grad():
         for batch in testloader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             token_type_ids = batch['token_type_ids'].to(device)
+            start_positions = batch['start_positions'].to(device)
+            end_positions = batch['end_positions'].to(device)
 
             outputs = model(
                 input_ids=input_ids,
@@ -201,12 +302,58 @@ def evaluate_qa_model(model, testloader, device: str = 'cuda') -> float:
                 token_type_ids=token_type_ids
             )
 
-            # For demonstration, just check if start_logits and end_logits exist
-            if hasattr(outputs, 'start_logits') and hasattr(outputs, 'end_logits'):
-                correct += 1
-            total += 1
+            # Compute loss
+            start_loss = loss_fn(outputs.start_logits, start_positions)
+            end_loss = loss_fn(outputs.end_logits, end_positions)
+            loss = (start_loss + end_loss) / 2
+            total_loss += loss.item() * input_ids.size(0)
+            
+            # Compute predictions
+            pred_start = torch.argmax(outputs.start_logits, dim=1)
+            pred_end = torch.argmax(outputs.end_logits, dim=1)
+            
+            # Exact match: both start and end must be correct
+            em = ((pred_start == start_positions) & (pred_end == end_positions)).sum().item()
+            total_em += em
+            
+            # Token-level F1 (simplified)
+            batch_size = input_ids.size(0)
+            for i in range(batch_size):
+                # Get predicted and true spans
+                pred_s, pred_e = pred_start[i].item(), pred_end[i].item()
+                true_s, true_e = start_positions[i].item(), end_positions[i].item()
+                
+                if pred_e < pred_s:
+                    pred_s, pred_e = pred_e, pred_s
+                
+                # Compute overlap
+                overlap_start = max(pred_s, true_s)
+                overlap_end = min(pred_e, true_e)
+                
+                if overlap_start <= overlap_end:
+                    overlap_len = overlap_end - overlap_start + 1
+                    pred_len = pred_e - pred_s + 1
+                    true_len = true_e - true_s + 1
+                    
+                    precision = overlap_len / pred_len if pred_len > 0 else 0
+                    recall = overlap_len / true_len if true_len > 0 else 0
+                    
+                    if precision + recall > 0:
+                        f1 = 2 * precision * recall / (precision + recall)
+                    else:
+                        f1 = 0.0
+                else:
+                    f1 = 0.0
+                
+                total_f1 += f1
+            
+            total_samples += batch_size
 
-    return 100.0 * correct / total if total > 0 else 0.0
+    avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+    em_score = 100.0 * total_em / total_samples if total_samples > 0 else 0.0
+    f1_score = 100.0 * total_f1 / total_samples if total_samples > 0 else 0.0
+    
+    return em_score, f1_score, avg_loss
 
 
 def train_geta(
@@ -267,7 +414,7 @@ def train_geta(
 
     optimizer = GETA(
         params=param_groups,
-        variant="adam",
+        variant="adamw",
         lr=config.lr,
         lr_quant=config.lr_quant,
         first_momentum=0.9,
@@ -353,10 +500,11 @@ def train_geta(
         
         # Evaluate and print epoch summary
         avg_loss = epoch_loss / len(trainloader)
-        val_acc = evaluate_qa_model(model, testloader, config.device)
+        val_em, val_f1, val_loss = evaluate_qa_model(model, testloader, config.device)
         metrics = optimizer.compute_metrics()
         
-        print_epoch_summary(epoch, config.epochs, avg_loss, val_acc, val_acc, metrics)
+        # Use F1 as primary metric for epoch summary
+        print_epoch_summary(epoch, config.epochs, avg_loss, val_em, val_f1, metrics)
 
     total_time = time.time() - start_time
     # Final evaluation
@@ -364,7 +512,7 @@ def train_geta(
     print("Final Evaluation")
     print("=" * 70)
     
-    final_acc = evaluate_qa_model(model, testloader, config.device)
+    final_em, final_f1, final_loss = evaluate_qa_model(model, testloader, config.device)
     final_metrics = optimizer.compute_metrics()
     
     # Compute compressed MACs and BOPs
@@ -375,6 +523,7 @@ def train_geta(
     
     print(f"Compressed MACs: {compressed_macs:.2f} M")
     print(f"Compressed BOPs: {compressed_bops:.2f} M")
+    print(f"Final EM: {final_em:.2f}%, F1: {final_f1:.2f}%")
     
     # Create results
     results = ExperimentResults(
@@ -388,8 +537,8 @@ def train_geta(
         full_bops=full_bops,
         compressed_macs=compressed_macs,
         compressed_bops=compressed_bops,
-        final_top1_accuracy=final_acc,
-        final_top5_accuracy=final_acc, # Same as val_acc1 for QA
+        final_top1_accuracy=final_em,  # EM score
+        final_top5_accuracy=final_f1,  # F1 score
         total_param_norm=final_metrics.norm_params,
         group_sparsity=final_metrics.group_sparsity,
         num_important_groups=final_metrics.num_important_groups,
@@ -432,7 +581,13 @@ def main():
 
     # Step 3: Load dataset
     print("[Step 3] Loading SQuAD dataset...")
-    trainloader, testloader, trainset = get_squad_loaders(config, tokenizer)
+    max_train = getattr(args, 'max_train_samples', None)
+    max_eval = getattr(args, 'max_eval_samples', None)
+    trainloader, testloader, trainset = get_squad_loaders(
+        config, tokenizer, 
+        max_train_samples=max_train,
+        max_eval_samples=max_eval
+    )
     print(f"Training samples: {len(trainset)}")
     print(f"Test samples: {len(testloader.dataset)}")
 
