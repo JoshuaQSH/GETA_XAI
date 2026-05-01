@@ -68,7 +68,7 @@ Check out [uv](https://docs.astral.sh/uv/getting-started/installation/) for more
 ```bash
 # Try the vgg7 with CIFAR10 
 python qvgg7_xaigeta_demo.py
-# python qvgg7_xaigeta_demo.py --method <ATTRIBUTION_METHOD> --weight 0.3 --epochs 50 --device "cuda:0" > "./logs/vgg7_demo.log" 2>&1
+# python qvgg7_xaigeta_demo.py --method <ATTRIBUTION_METHOD> --weight 0.1 --epochs 50 --device "cuda:0" > "./logs/vgg7_demo.log" 2>&1
 
 # To compare with the GETA 
 python qvgg7_geta_demo.py
@@ -82,7 +82,7 @@ We also have a `run_xaigeta_experiments.sh` ready for running the demo:
 
 Options:
   -m, --method METHOD     Attribution method (default: run all methods)
-  -w, --weight WEIGHT     Attribution weight 0.0-1.0 (default: 0.3)
+  -w, --weight WEIGHT     Attribution weight 0.0-1.0 (default: 0.1)
   -e, --epochs EPOCHS     Number of epochs (default: 50)
   -d, --device DEVICE     Device to use (default: cuda:0)
   -a, --all               Run all methods with all default weights
@@ -91,7 +91,7 @@ Options:
   -h, --help              Show this help message
 
 Examples:
-  ./run_xaigeta_experiments.sh -m saliency -w 0.3 -e 50    # Single experiment
+  ./run_xaigeta_experiments.sh -m saliency -w 0.1 -e 50    # Single experiment
   ./run_xaigeta_experiments.sh --all                        # All methods with weights 0.1, 0.3, 0.5
   ./run_xaigeta_experiments.sh --fast -e 10                 # Fast methods, 10 epochs each
 
@@ -114,7 +114,7 @@ The repository includes reusable Slurm jobs in `./viking_running_jobs/` for the 
 
 - `run_demo.job`: small sanity/demo jobs (`quickcheck`, `multimethod`, `pytest`, or `vgg7-demo`)
 - `run_cases.job`: single experiment launcher for VGG7, ResNet20, ResNet50, and BERT GETA/XAI-GETA runs
-- `run_vgg7_compare.job`: first VGG comparison pack (GETA baseline + selected XAI-GETA runs)
+- `run_vgg7_compare.job`: VGG stability pack (GETA baseline + weight/method sensitivity checks)
 - `run_vgg7_sweep.job`: Slurm array sweep for VGG7 XAI methods and weights
 - `run_resnet50_dist.job`: distributed ResNet50 ImageNet XAI-GETA launcher with `torchrun`
 
@@ -128,7 +128,7 @@ cd GETA_XAI
 sbatch viking_running_jobs/run_demo.job
 
 # single full experiment
-sbatch --export=ALL,CASE=vgg7-xai,METHOD=saliency,WEIGHT=0.3,SPARSITY=0.7,EPOCHS=200 \
+sbatch --export=ALL,CASE=vgg7-xai,METHOD=saliency,WEIGHT=0.1,SPARSITY=0.7,EPOCHS=200 \
   viking_running_jobs/run_cases.job
 
 # first VGG comparison pack

@@ -147,6 +147,9 @@ class CaptumAttributionCalculator:
     def get_layer_from_param(self, param_name: str) -> Optional[str]:
         return self._get_layer_from_param(param_name)
 
+    def get_layer_module(self, layer_name: str) -> Optional[nn.Module]:
+        return self._get_layer_module(layer_name)
+
     def _resolve_structured_method(self, method: str) -> str:
         return STRUCTURED_METHOD_ALIASES.get(method, method)
 

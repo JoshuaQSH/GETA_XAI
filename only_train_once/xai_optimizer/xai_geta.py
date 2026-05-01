@@ -154,19 +154,20 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         
         # Set up importance score criteria
         if importance_score_criteria == "default":
-            if self.captum_calculator is not None and attribution_weight > 0:
-                # Use attribution as part of the criteria (only when weight > 0)
-                self.importance_score_criteria = {
-                    "attribution": attribution_weight,
-                    "magnitude": (1.0 - attribution_weight) * 0.2,
-                    "avg_magnitude": (1.0 - attribution_weight) * 0.2,
-                    "cosine_similarity": (1.0 - attribution_weight) * 0.2,
-                    "taylor_first_order": (1.0 - attribution_weight) * 0.2,
-                    "taylor_second_order": (1.0 - attribution_weight) * 0.2,
-                }
-            else:
-                # Fallback to original GETA criteria (exact same as GETA)
-                # This ensures attribution_weight=0 produces identical behavior to GETA
+            self.importance_score_criteria = {
+                "magnitude": 0.2,
+                "avg_magnitude": 0.2,
+                "cosine_similarity": 0.2,
+                "taylor_first_order": 0.2,
+                "taylor_second_order": 0.2,
+            }
+        else:
+            self.importance_score_criteria = {
+                name: weight
+                for name, weight in importance_score_criteria.items()
+                if name not in {"attribution", "captum_attribution"}
+            }
+            if not self.importance_score_criteria:
                 self.importance_score_criteria = {
                     "magnitude": 0.2,
                     "avg_magnitude": 0.2,
@@ -174,8 +175,6 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                     "taylor_first_order": 0.2,
                     "taylor_second_order": 0.2,
                 }
-        else:
-            self.importance_score_criteria = importance_score_criteria
         
         additional_defaults = dict(
             lr_quant=lr_quant,
@@ -223,18 +222,58 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         
         self.logger.info(f"XAI_GETA initialized with criteria: {self.importance_score_criteria}")
 
+    def _score_layer_priority(self, layer_name: str) -> int:
+        module = self.captum_calculator.get_layer_module(layer_name)
+        if module is None:
+            return 3
+        if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.Linear)):
+            return 0
+        if isinstance(
+            module,
+            (
+                nn.BatchNorm1d,
+                nn.BatchNorm2d,
+                nn.BatchNorm3d,
+                nn.SyncBatchNorm,
+                nn.LayerNorm,
+                nn.GroupNorm,
+                nn.InstanceNorm1d,
+                nn.InstanceNorm2d,
+                nn.InstanceNorm3d,
+            ),
+        ):
+            return 1
+        return 2
+
     def _collect_attribution_layer_names(self) -> List[str]:
-        """Collect layer names that correspond to prunable optimizer groups."""
+        """Annotate each prunable group with canonical attribution layers."""
         layer_names = []
         for group in self.param_groups:
             if not group["is_prunable"] or group["is_auxiliary"]:
                 continue
+
+            candidate_layer_names = []
             for p_name in group["p_names"]:
                 parts = p_name.rsplit(".", 1)
                 if len(parts) != 2 or parts[1] not in {"weight", "bias"}:
                     continue
                 layer_name = self.captum_calculator.get_layer_from_param(p_name) or parts[0]
-                layer_names.append(layer_name)
+                candidate_layer_names.append(layer_name)
+
+            unique_candidates = list(dict.fromkeys(candidate_layer_names))
+            if not unique_candidates:
+                group["attribution_layer_names"] = []
+                continue
+
+            best_priority = min(self._score_layer_priority(name) for name in unique_candidates)
+            selected_layer_names = [
+                name
+                for name in unique_candidates
+                if self._score_layer_priority(name) == best_priority
+            ]
+            group["attribution_layer_names"] = selected_layer_names
+            layer_names.extend(selected_layer_names)
+
         return sorted(set(layer_names))
 
     def compute_initial_attributions(
@@ -362,12 +401,16 @@ class XAI_GETA(BaseHybridSparseOptimizer):
         """
         global_start_idx = 0
         self.global_scores = list()
+        scoring_criteria = dict(self.importance_score_criteria)
+        use_attribution = self.captum_calculator is not None and self.attribution_weight > 0
+        if use_attribution:
+            scoring_criteria["attribution"] = 1.0
         
         # Calculate raw importance scores using xAI method
         for group in self.param_groups:
             if group["is_prunable"] and not group["is_auxiliary"]:
                 calculate_xai_importance_score(
-                    self.importance_score_criteria,
+                    scoring_criteria,
                     group,
                     captum_calculator=self.captum_calculator,
                     cached_attributions=self._cached_attributions,
@@ -375,11 +418,11 @@ class XAI_GETA(BaseHybridSparseOptimizer):
 
         # Normalize importance scores (same as base class)
         normalization_denoms = dict.fromkeys(
-            self.importance_score_criteria.keys(), self.safe_guard
+            scoring_criteria.keys(), self.safe_guard
         )
         for group in self.param_groups:
             if group["is_prunable"] and not group["is_auxiliary"]:
-                for proxy_name in self.importance_score_criteria:
+                for proxy_name in scoring_criteria:
                     if proxy_name not in group["importance_scores"]:
                         continue
                     normalization_denoms[proxy_name] += torch.sum(
@@ -411,6 +454,27 @@ class XAI_GETA(BaseHybridSparseOptimizer):
                         group["importance_scores"]["overall"] += group[
                             "importance_scores"
                         ][proxy_name]
+
+                if (
+                    use_attribution
+                    and group["importance_scores"]["overall"] is not None
+                    and group.get("_has_cached_attribution")
+                    and "attribution" in group["importance_scores"]
+                ):
+                    attribution_scores = group["importance_scores"]["attribution"].clone()
+                    attribution_scores.mul_(1.0 / normalization_denoms["attribution"])
+                    attr_mean = torch.mean(attribution_scores).clamp(min=self.safe_guard)
+                    relative_attr = torch.clamp(attribution_scores / attr_mean, min=0.5, max=1.5)
+                    attr_multiplier = (
+                        (1.0 - self.attribution_weight)
+                        + self.attribution_weight * relative_attr
+                    )
+                    group["importance_scores"]["attribution"] = attribution_scores
+                    group["importance_scores"]["attribution_modulation"] = attr_multiplier
+                    group["importance_scores"]["overall"] = (
+                        group["importance_scores"]["overall"] * attr_multiplier
+                    )
+
                 group["global_start_idx"] = global_start_idx
                 group["global_idxes"] = np.arange(
                     global_start_idx, global_start_idx + group["num_groups"]

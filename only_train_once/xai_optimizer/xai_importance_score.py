@@ -137,6 +137,7 @@ def _importance_score_by_attribution(
     """
     num_groups = param_group["num_groups"]
     device = param_group["params"][0].device if param_group["params"] else "cpu"
+    param_group["_has_cached_attribution"] = False
     
     # First compute magnitude-based scores for normalization reference
     mag_norm_group = None
@@ -156,13 +157,16 @@ def _importance_score_by_attribution(
     
     # Try to get attribution from cache
     if cached_attributions is not None:
-        layer_names = []
-        for p_name in param_group["p_names"]:
-            parts = p_name.rsplit('.', 1)
-            if len(parts) == 2 and parts[1] in ['weight', 'bias']:
-                layer_names.append(parts[0])
-
-        unique_layer_names = list(dict.fromkeys(layer_names))
+        configured_layer_names = param_group.get("attribution_layer_names")
+        if configured_layer_names is not None:
+            unique_layer_names = list(dict.fromkeys(configured_layer_names))
+        else:
+            layer_names = []
+            for p_name in param_group["p_names"]:
+                parts = p_name.rsplit('.', 1)
+                if len(parts) == 2 and parts[1] in ['weight', 'bias']:
+                    layer_names.append(parts[0])
+            unique_layer_names = list(dict.fromkeys(layer_names))
         layer_scores = []
         for layer_name in unique_layer_names:
             if layer_name in cached_attributions:
@@ -171,6 +175,7 @@ def _importance_score_by_attribution(
 
         if layer_scores:
             scores = torch.stack(layer_scores).mean(dim=0)
+            param_group["_has_cached_attribution"] = True
 
             if mag_scores is not None and scores.sum() > 1e-8:
                 attr_scale = mag_scores.sum() / (scores.sum() + 1e-8)

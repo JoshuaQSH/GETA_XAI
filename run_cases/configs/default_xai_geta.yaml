@@ -38,8 +38,8 @@ xai:
   # Attribution method: saliency, input_x_gradient, layer_conductance,
   #   layer_gradient_x_activation, layer_integrated_gradients, deep_lift,
   #   integrated_gradients, lrp, layer_lrp, gradient_shap
-  attribution_method: 'saliency'  # Recommended default for VGG runs
-  attribution_weight: 0.3  # Recommended first comparison setting
+  attribution_method: 'saliency'  # Conservative default for VGG reruns
+  attribution_weight: 0.1  # Start low; VGG saliency proved sensitive at higher weights
   attribution_freq: 100    # Frequency of attribution updates (steps)
   attribution_n_steps: 5   # Number of steps for integrated gradients methods
   ema_decay: 0.9           # EMA decay for attribution smoothing

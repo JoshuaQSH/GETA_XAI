@@ -12,6 +12,7 @@ from only_train_once.xai_optimizer.captum_attribution import (
     QUANTIZATION_INCOMPATIBLE_METHODS,
     SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS,
 )
+from sanity_check.backends.vgg7 import vgg7_bn
 import sanity_xai.qvgg7_xai_quickcheck_demo as quickcheck_demo
 
 
@@ -170,6 +171,48 @@ def test_step_updates_cached_attributions(device):
     assert cached.ndim in (1, 3)
 
 
+def test_structural_layers_are_preferred_for_group_attribution(device):
+    model = vgg7_bn()
+    model = model_to_quantize_model(
+        model,
+        quant_mode=QuantizationMode.WEIGHT_AND_ACTIVATION,
+    ).to(device)
+    dummy_input = torch.randn(1, 3, 32, 32, device=device)
+    oto = OTO(model, dummy_input)
+    optimizer = XAI_GETA(
+        params=oto._graph.get_param_groups(),
+        model=model,
+        variant="adam",
+        lr=1e-3,
+        lr_quant=1e-3,
+        first_momentum=0.9,
+        weight_decay=1e-4,
+        target_group_sparsity=0.5,
+        start_projection_step=0,
+        projection_periods=2,
+        projection_steps=4,
+        start_pruning_step=4,
+        pruning_periods=2,
+        pruning_steps=8,
+        bit_reduction=2,
+        min_bit_wt=4,
+        max_bit_wt=16,
+        device=str(device),
+        attribution_method="saliency",
+        attribution_weight=0.3,
+        compute_attribution_freq=1,
+        attribution_n_steps=2,
+    )
+
+    first_prunable_group = next(
+        group
+        for group in optimizer.param_groups
+        if group["is_prunable"] and not group["is_auxiliary"]
+    )
+    assert "features.0" in first_prunable_group["attribution_layer_names"]
+    assert "features.1" not in first_prunable_group["attribution_layer_names"]
+
+
 def test_xai_geta_matches_geta_when_attribution_disabled(device):
     torch.manual_seed(21)
     model_geta = create_quantized_model(device, inplace=False)
@@ -205,6 +248,40 @@ def test_xai_geta_matches_geta_when_attribution_disabled(device):
         assert name_geta == name_xai
         max_diff = (param_geta - param_xai).abs().max().item()
         assert max_diff < 5e-4, f"{name_geta}: max diff {max_diff}"
+
+
+def test_attribution_modulation_is_bounded(device):
+    torch.manual_seed(31)
+    model = create_quantized_model(device, inplace=False)
+    _, optimizer = create_optimizer(
+        XAI_GETA,
+        model,
+        device,
+        attribution_method="saliency",
+        attribution_weight=0.3,
+        compute_attribution_freq=1,
+        attribution_n_steps=2,
+    )
+
+    x = torch.randn(8, 3, 32, 32, device=device)
+    y = torch.randint(0, 10, (8,), device=device)
+    loss = nn.CrossEntropyLoss()(model(x), y)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step(inputs=x, targets=y)
+    optimizer.compute_importance_scores()
+
+    lower = 1.0 - 0.5 * optimizer.attribution_weight
+    upper = 1.0 + 0.5 * optimizer.attribution_weight
+    bounded_groups = 0
+    for group in optimizer.param_groups:
+        modulation = group["importance_scores"].get("attribution_modulation")
+        if modulation is None:
+            continue
+        bounded_groups += 1
+        assert torch.all(modulation >= lower - 1e-6)
+        assert torch.all(modulation <= upper + 1e-6)
+    assert bounded_groups > 0
 
 
 @pytest.mark.parametrize("method", SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS)
