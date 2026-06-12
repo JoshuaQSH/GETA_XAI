@@ -28,6 +28,8 @@ from only_train_once import OTO
 from only_train_once.quantization.quant_model import model_to_quantize_model
 from only_train_once.quantization.quant_layers import QuantizationMode
 from sanity_check.backends.vgg7 import vgg7_bn
+from sanity_check.backends.resnet20_cifar10 import resnet20_cifar10
+from sanity_check.backends.resnet_cifar10 import resnet18_cifar10
 
 
 # ============================================================================
@@ -550,6 +552,30 @@ def create_quantized_vgg7(device: str = 'cuda:0') -> Tuple[nn.Module, torch.Tens
     )
     dummy_input = torch.rand(1, 3, 32, 32)
     
+    return model.to(device), dummy_input.to(device)
+
+
+def create_quantized_resnet20(device: str = 'cuda:0') -> Tuple[nn.Module, torch.Tensor]:
+    """Create quantized ResNet20 model and dummy input."""
+    model = resnet20_cifar10()
+    model = model_to_quantize_model(
+        model,
+        quant_mode=QuantizationMode.WEIGHT_AND_ACTIVATION,
+        q_m_init=1.0,
+    )
+    dummy_input = torch.rand(1, 3, 32, 32)
+    return model.to(device), dummy_input.to(device)
+
+
+def create_quantized_resnet18(device: str = 'cuda:0') -> Tuple[nn.Module, torch.Tensor]:
+    """Create quantized ResNet18 model and dummy input."""
+    model = resnet18_cifar10()
+    model = model_to_quantize_model(
+        model,
+        quant_mode=QuantizationMode.WEIGHT_AND_ACTIVATION,
+        q_m_init=1.0,
+    )
+    dummy_input = torch.rand(1, 3, 32, 32)
     return model.to(device), dummy_input.to(device)
 
 

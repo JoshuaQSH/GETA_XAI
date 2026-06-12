@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from PIL import Image
 
 # Add parent directory to path
@@ -118,7 +118,11 @@ class RobustImageFolder(Dataset):
                 return Image.new('RGB', (224, 224), (0, 0, 0)), 0
 
 
-def get_imagenet_loaders(config: ExperimentConfig) -> tuple:
+def get_imagenet_loaders(
+    config: ExperimentConfig,
+    max_train_samples=None,
+    max_eval_samples=None,
+) -> tuple:
     """Load ImageNet dataset and return train/test loaders."""
 
     train_transform = transforms.Compose([
@@ -144,6 +148,19 @@ def get_imagenet_loaders(config: ExperimentConfig) -> tuple:
         root=os.path.join(config.dataset_root, 'ImageNet', 'val'),
         transform=test_transform
     )
+
+    if max_train_samples is not None:
+        train_count = min(len(trainset), max_train_samples)
+        train_indices = torch.randperm(
+            len(trainset), generator=torch.Generator().manual_seed(2027)
+        )[:train_count].tolist()
+        trainset = Subset(trainset, train_indices)
+    if max_eval_samples is not None:
+        eval_count = min(len(testset), max_eval_samples)
+        eval_indices = torch.randperm(
+            len(testset), generator=torch.Generator().manual_seed(2028)
+        )[:eval_count].tolist()
+        testset = Subset(testset, eval_indices)
 
     # Use RobustImageFolder to handle corrupted images
     # trainset = RobustImageFolder(
@@ -384,15 +401,19 @@ def main():
 
     # Step 3: Load dataset
     print("[Step 3] Loading ImageNet dataset...")
-    trainloader, testloader, trainset = get_imagenet_loaders(config)
+    max_train = getattr(args, 'max_train_samples', None)
+    max_eval = getattr(args, 'max_eval_samples', None)
+    trainloader, testloader, trainset = get_imagenet_loaders(
+        config,
+        max_train_samples=max_train,
+        max_eval_samples=max_eval,
+    )
     print(f"Training samples: {len(trainset)}")
     print(f"Test samples: {len(testloader.dataset)}")
 
     # Step 4: Train with GETA
     print("\n[Step 4] Training with GETA optimizer...")
-    results, trained_model, oto = train_geta(
-        trainloader, testloader, model, oto, config
-    )
+    results = train_geta(trainloader, testloader, model, oto, config)
 
     # Print and save results
     print_results_summary(results)
@@ -406,7 +427,7 @@ def main():
     print("GETA Experiment Complete!")
     print("=" * 70 + "\n")
 
-    return results, trained_model, oto
+    return results
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -282,6 +283,219 @@ def test_attribution_modulation_is_bounded(device):
         assert torch.all(modulation >= lower - 1e-6)
         assert torch.all(modulation <= upper + 1e-6)
     assert bounded_groups > 0
+
+
+def test_v31_caps_focus_pruning(device):
+    from only_train_once.xai_optimizer_31 import XAI_GETA_V31
+
+    torch.manual_seed(41)
+    model = create_quantized_model(device, inplace=False)
+    _, optimizer = create_optimizer(
+        XAI_GETA_V31,
+        model,
+        device,
+        attribution_method="saliency",
+        attribution_weight=0.3,
+        compute_attribution_freq=1000,
+        attribution_n_steps=2,
+        quant_sensitivity_weight=0.25,
+        quant_sensitivity_start_period=0,
+        quant_focus_quantile=0.8,
+        max_focus_prune_fraction=0.0,
+    )
+
+    prunable_groups = [
+        group
+        for group in optimizer.param_groups
+        if group["is_prunable"] and not group["is_auxiliary"]
+    ]
+    assert len(prunable_groups) >= 2
+
+    optimizer.pruned_group_idxes = []
+    optimizer.curr_pruning_period = 0
+    optimizer.active_num_redundant_groups = [3, 3]
+    optimizer.group_divisible = 1
+    optimizer.target_num_redundant_groups = 3
+    optimizer.global_scores = []
+
+    global_start_idx = 0
+    for group_idx, group in enumerate(prunable_groups):
+        num_groups = group["num_groups"]
+        group["global_start_idx"] = global_start_idx
+        group["global_idxes"] = np.arange(global_start_idx, global_start_idx + num_groups)
+        group["important_idxes"] = list(range(num_groups))
+        group["pruned_idxes"] = []
+        group["active_redundant_idxes"] = []
+
+        overall = torch.arange(
+            1 + group_idx * num_groups,
+            1 + (group_idx + 1) * num_groups,
+            device=device,
+            dtype=torch.float32,
+        )
+        focus = torch.zeros(num_groups, device=device, dtype=torch.float32)
+        focus[0] = 1.0
+
+        group["importance_scores"]["overall"] = overall
+        group["importance_scores"]["quant_focus_synergy"] = focus
+        optimizer.global_scores.append(overall)
+        global_start_idx += num_groups
+
+    optimizer.identify_redundant_groups()
+
+    for group in prunable_groups:
+        assert 0 not in group["active_redundant_idxes"]
+
+
+def test_v32_reduces_d_quant_for_focused_redundant_groups(device):
+    from only_train_once.xai_optimizer_28 import XAI_GETA_V28
+    from only_train_once.xai_optimizer_32 import XAI_GETA_V32
+
+    torch.manual_seed(51)
+    model = create_quantized_model(device, inplace=False)
+    _, optimizer = create_optimizer(
+        XAI_GETA_V32,
+        model,
+        device,
+        attribution_method="saliency",
+        attribution_weight=0.3,
+        compute_attribution_freq=1000,
+        attribution_n_steps=2,
+        quant_sensitivity_weight=0.25,
+        quant_sensitivity_start_period=0,
+        quant_focus_quantile=0.8,
+        gamma_modulation_strength=0.3,
+        d_quant_focus_blend=0.5,
+    )
+
+    x = torch.randn(8, 3, 32, 32, device=device)
+    y = torch.randint(0, 10, (8,), device=device)
+    loss = nn.CrossEntropyLoss()(model(x), y)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.compute_grad_variant()
+    optimizer.curr_pruning_period = 1
+
+    group = next(
+        group
+        for group in optimizer.param_groups
+        if group["is_prunable"] and not group["is_auxiliary"]
+    )
+    group["global_start_idx"] = 0
+    focus = torch.zeros(group["num_groups"], device=device)
+    active_redundant_idxes = list(range(min(2, group["num_groups"])))
+    focus[active_redundant_idxes] = 1.0
+    optimizer._group_focus_cache = {0: focus}
+
+    bit_range = [optimizer.min_bit_wt, optimizer.max_bit_wt]
+    gamma_v28, d_quant_v28 = XAI_GETA_V28.compute_gamma_d(
+        optimizer, group, active_redundant_idxes, bit_range
+    )
+    gamma_v32, d_quant_v32 = optimizer.compute_gamma_d(
+        group, active_redundant_idxes, bit_range
+    )
+
+    assert gamma_v32 == pytest.approx(gamma_v28)
+    assert d_quant_v32 > 0
+    assert d_quant_v32 <= d_quant_v28
+
+
+def test_v33_handoff_anchor_pulls_toward_snapshot(device):
+    from only_train_once.xai_optimizer_33 import XAI_GETA_V33
+
+    torch.manual_seed(61)
+    model = create_quantized_model(device, inplace=False)
+    _, optimizer = create_optimizer(
+        XAI_GETA_V33,
+        model,
+        device,
+        attribution_method="saliency",
+        attribution_weight=0.3,
+        compute_attribution_freq=1000,
+        attribution_n_steps=2,
+        quant_sensitivity_weight=0.25,
+        quant_sensitivity_start_period=0,
+        quant_focus_quantile=0.8,
+        handoff_anchor_blend=0.2,
+        handoff_anchor_steps=10,
+    )
+
+    group = next(
+        group
+        for group in optimizer.param_groups
+        if group["is_prunable"] and not group["is_auxiliary"]
+    )
+    group["global_start_idx"] = 0
+    optimizer._handoff_group_strength = {0: 1.0}
+    optimizer.handoff_start_step = 5
+
+    tracked_param = next(
+        (p_name, p)
+        for p_name, p in zip(group["p_names"], group["params"])
+        if optimizer._should_track_param(p_name)
+    )
+    p_name, param = tracked_param
+    snapshot = torch.zeros_like(param.data)
+    optimizer._handoff_snapshot_params = {p_name: snapshot}
+    optimizer._handoff_snapshot_captured = True
+
+    param.data.fill_(1.0)
+    optimizer.num_steps = 6
+    optimizer._apply_handoff_anchor()
+
+    assert torch.all(param.data < 1.0)
+
+
+def test_v34_selects_best_tail_snapshot(device):
+    from only_train_once.xai_optimizer_34 import XAI_GETA_V34
+
+    torch.manual_seed(71)
+    model = create_quantized_model(device, inplace=False)
+    _, optimizer = create_optimizer(
+        XAI_GETA_V34,
+        model,
+        device,
+        attribution_method="saliency",
+        attribution_weight=0.3,
+        compute_attribution_freq=1000,
+        attribution_n_steps=2,
+        quant_sensitivity_weight=0.25,
+        quant_sensitivity_start_period=0,
+        quant_focus_quantile=0.8,
+        tail_proxy_drift_weight=0.5,
+    )
+
+    group = next(
+        group
+        for group in optimizer.param_groups
+        if group["is_prunable"] and not group["is_auxiliary"]
+    )
+    group["global_start_idx"] = 0
+    optimizer._handoff_group_strength = {0: 1.0}
+    optimizer.num_steps = optimizer.tail_start_step
+
+    tracked = next(
+        (p_name, p)
+        for p_name, p in zip(group["p_names"], group["params"])
+        if optimizer._should_track_param(p_name)
+    )
+    p_name, param = tracked
+    baseline = torch.zeros_like(param.data)
+    optimizer._handoff_snapshot_params = {p_name: baseline}
+
+    param.data.fill_(0.6)
+    optimizer.observe_epoch(epoch=1, train_loss=1.0, group_sparsity=0.8)
+    first_snapshot = optimizer._best_tail_snapshot_params[p_name].clone()
+
+    param.data.fill_(0.2)
+    optimizer.observe_epoch(epoch=2, train_loss=0.8, group_sparsity=0.8)
+    second_snapshot = optimizer._best_tail_snapshot_params[p_name].clone()
+
+    assert not torch.allclose(first_snapshot, second_snapshot)
+
+    param.data.fill_(1.0)
+    optimizer.finalize_for_evaluation()
+    assert torch.allclose(param.data, second_snapshot)
 
 
 @pytest.mark.parametrize("method", SUPPORTED_STRUCTURED_ATTRIBUTION_METHODS)

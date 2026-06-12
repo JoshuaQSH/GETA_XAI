@@ -24,13 +24,15 @@ Experimental Setup:
 - Optimizer: AdamW (1e-3)
 """
 
+import json
 import os
+import random
 import sys
 import time
-import json
 from tqdm import tqdm
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -247,17 +249,35 @@ def get_squad_loaders(config: ExperimentConfig, tokenizer, max_train_samples=Non
     return trainloader, testloader, train_dataset
 
 
-def create_quantized_bert(device: str = 'cuda:0') -> tuple:
+def create_quantized_bert(
+    device: str = 'cuda:0',
+    model_name: str = 'bert-base-uncased',
+    qa_checkpoint: str = '',
+    num_hidden_layers: int = 2,
+) -> tuple:
     """Create quantized BERT model and dummy input."""
     from transformers import AutoTokenizer, AutoConfig, AutoModelForQuestionAnswering
     from only_train_once.quantization.quant_model import model_to_quantize_model
     from only_train_once.quantization.quant_layers import QuantizationMode
 
-    # Use small BERT for quick testing
-    model_name = "bert-base-uncased"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    config = AutoConfig.from_pretrained(model_name, num_hidden_layers=2)
-    model = AutoModelForQuestionAnswering.from_config(config)
+    if qa_checkpoint:
+        tokenizer = AutoTokenizer.from_pretrained(qa_checkpoint)
+        model = AutoModelForQuestionAnswering.from_pretrained(qa_checkpoint)
+        if (
+            num_hidden_layers > 0
+            and hasattr(model, "bert")
+            and hasattr(model.bert, "encoder")
+            and hasattr(model.bert.encoder, "layer")
+            and num_hidden_layers < len(model.bert.encoder.layer)
+        ):
+            model.bert.encoder.layer = torch.nn.ModuleList(
+                list(model.bert.encoder.layer[:num_hidden_layers])
+            )
+            model.config.num_hidden_layers = num_hidden_layers
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        config = AutoConfig.from_pretrained(model_name, num_hidden_layers=num_hidden_layers)
+        model = AutoModelForQuestionAnswering.from_config(config)
 
     model = model_to_quantize_model(
         model,
@@ -271,6 +291,14 @@ def create_quantized_bert(device: str = 'cuda:0') -> tuple:
     dummy_input = (inputs['input_ids'], inputs['attention_mask'], inputs['token_type_ids'])
 
     return model.to(device), tuple(t.to(device) for t in dummy_input), tokenizer
+
+
+def seed_all(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def evaluate_qa_model(model, testloader, device: str = 'cuda') -> tuple:
@@ -556,7 +584,32 @@ def main():
 
     # Parse arguments
     parser = get_base_parser('BERT SQuAD GETA Experiment')
+    parser.add_argument(
+        '--model-name',
+        type=str,
+        default='bert-base-uncased',
+        help='Base HuggingFace model name when building a fresh QA model.',
+    )
+    parser.add_argument(
+        '--qa-checkpoint',
+        type=str,
+        default='',
+        help='Optional pretrained QA checkpoint to fine-tune instead of a fresh model.',
+    )
+    parser.add_argument(
+        '--num-hidden-layers',
+        type=int,
+        default=2,
+        help='Number of hidden layers when building a fresh QA model from config.',
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=2027,
+        help='Random seed for model init and data order.',
+    )
     args = parser.parse_args()
+    seed_all(args.seed)
     config = args_to_config(args, is_xai=False)
 
     # Print configuration
@@ -570,7 +623,12 @@ def main():
 
     # Step 1: Create model
     print("[Step 1] Creating quantized BERT model...")
-    model, dummy_input, tokenizer = create_quantized_bert(config.device)
+    model, dummy_input, tokenizer = create_quantized_bert(
+        config.device,
+        model_name=args.model_name,
+        qa_checkpoint=args.qa_checkpoint,
+        num_hidden_layers=args.num_hidden_layers,
+    )
 
     # Step 2: Initialize OTO
     print("[Step 2] Initializing OTO framework...")
